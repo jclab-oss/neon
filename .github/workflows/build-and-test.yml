@@ -142,7 +142,11 @@ jobs:
           NEXTEST_RETRIES: 3
         run: |
           export LD_LIBRARY_PATH="$(pwd)/pg_install/${PG_VERSION}/lib"
-          cargo nextest run --locked -E '!package(pageserver)'
+          # `test_real_gcs` is excluded because, unlike the real-S3/Azure suites, it has
+          # no self-skip path: it panics on a missing GCS_TEST_BUCKET rather than
+          # returning early, so it can't run without real GCS credentials. Upstream
+          # only ever runs the real-cloud suites in dedicated, credentialed steps.
+          cargo nextest run --locked -E '!package(pageserver) & !binary(test_real_gcs)'
 
       - name: Run cargo nextest (pageserver)
         env:
