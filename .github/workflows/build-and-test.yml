@@ -76,6 +76,11 @@ jobs:
       contents: read
       packages: read
 
+    env:
+      # Keep cargo's home inside the workspace so the `Cache cargo deps` step below
+      # caches the same directory that the build actually uses.
+      CARGO_HOME: ${{ github.workspace }}/.cargo
+
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
       credentials:
@@ -83,7 +88,12 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       # Raise locked memory limit for tokio-epoll-uring, see
       # https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
+      #
+      # `--user root`: the build-tools image runs as `nonroot` (uid 1000), but a
+      # GitHub-hosted runner owns its work/_temp dirs as uid 1001, so actions that
+      # write runner file commands (checkout, cache, ...) fail with EACCES. Neon's
+      # own CI doesn't hit this because its self-hosted runners use uid 1000.
+      options: --init --user root --shm-size=512mb --ulimit memlock=67108864:67108864
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -109,14 +119,11 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: |
-            ~/.cargo/registry
-            !~/.cargo/registry/src
-            ~/.cargo/git
+            .cargo/registry
+            !.cargo/registry/src
+            .cargo/git
             target
           key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
-
-      - name: Set CARGO_HOME
-        run: echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> "$GITHUB_ENV"
 
       - name: Build Postgres + Neon (make all)
         run: mold -run make all -j$(nproc) CARGO_BUILD_FLAGS="--locked"
