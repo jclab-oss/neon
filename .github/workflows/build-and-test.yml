@@ -1,0 +1,172 @@
+name: "New: Build & Test"
+
+# Minimal, self-contained replacement for the upstream `build_and_test.yml` /
+# `_build-and-test-locally.yml` pipeline. The upstream pipeline is built around self-hosted
+# runners (large/large-metal/large-arm64), AWS OIDC, real S3/Azure remote-storage tests, an
+# internal Hetzner-backed cache, and an internal Allure/Postgres reporting backend, none of
+# which are available on a plain GitHub-hosted fork. Those originals were moved to
+# `.github/workflows-disabled/` for reference; see `.fork/workflows.md`.
+#
+# This workflow builds Neon + one Postgres version, runs the Rust unit tests, and runs the
+# Python regression tests (`test_runner/regress`) on GitHub-hosted runners only, with no
+# external cloud dependency. Real-S3/Azure-backed tests are skipped automatically (they
+# self-skip unless the corresponding env vars are set).
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      pg_version:
+        description: "Postgres major version to build/test"
+        required: false
+        default: "v17"
+        type: choice
+        options: [ v14, v15, v16, v17 ]
+
+concurrency:
+  group: build-and-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  COPT: "-Werror"
+  BUILD_TYPE: debug
+  PG_VERSION: ${{ inputs.pg_version || 'v17' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check-permissions:
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name }}
+
+  build-build-tools-image:
+    needs: [ check-permissions ]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-build-tools-image.yml
+    with:
+      # Build only one combination to keep CI time reasonable on GitHub-hosted runners.
+      archs: '["x64"]'
+      debians: '["bookworm"]'
+    secrets: inherit
+
+  # `build-macos.yml` used to be called from the now-disabled `neon_extra_builds.yml`. It is
+  # already GitHub-hosted (macos-15) and has no external dependencies, so it's wired up here
+  # instead. Its own `make-all` job only actually runs on `main` or when the PR is labeled
+  # `run-extra-build-macos` / `run-extra-build-*`.
+  build-macos:
+    needs: [ check-permissions ]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-macos.yml
+    secrets: inherit
+
+  build-and-test:
+    needs: [ build-build-tools-image ]
+    runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
+    timeout-minutes: 120
+
+    permissions:
+      contents: read
+      packages: read
+
+    container:
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # Raise locked memory limit for tokio-epoll-uring, see
+      # https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+
+      - name: Set pg revision for caching
+        id: pg_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-${PG_VERSION}) >> "$GITHUB_OUTPUT"
+
+      - name: Cache postgres build
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: pg_install/${{ env.PG_VERSION }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
+
+      - name: Cache cargo deps
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            !~/.cargo/registry/src
+            ~/.cargo/git
+            target
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+
+      - name: Set CARGO_HOME
+        run: echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> "$GITHUB_ENV"
+
+      - name: Build Postgres + Neon (make all)
+        run: mold -run make all -j$(nproc) CARGO_BUILD_FLAGS="--locked"
+
+      - name: Build walproposer-lib
+        run: mold -run make walproposer-lib -j$(nproc)
+
+      - name: Build test binaries
+        run: mold -run cargo build --locked --tests
+
+      - name: Run cargo doctests
+        run: cargo test --doc --locked
+
+      - name: Run cargo nextest (non-pageserver crates)
+        env:
+          NEXTEST_RETRIES: 3
+        run: |
+          export LD_LIBRARY_PATH="$(pwd)/pg_install/${PG_VERSION}/lib"
+          cargo nextest run --locked -E '!package(pageserver)'
+
+      - name: Run cargo nextest (pageserver)
+        env:
+          NEXTEST_RETRIES: 3
+          NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE: tokio-epoll-uring
+        run: |
+          export LD_LIBRARY_PATH="$(pwd)/pg_install/${PG_VERSION}/lib"
+          cargo nextest run --locked -E 'package(pageserver)'
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: Run Python regression tests
+        env:
+          NEON_BIN: ${{ github.workspace }}/target/debug
+          POSTGRES_DISTRIB_DIR: ${{ github.workspace }}/pg_install
+          DEFAULT_PG_VERSION: ${{ env.PG_VERSION }}
+          TEST_OUTPUT: /tmp/test_output
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          # Real S3/Azure-backed tests self-skip when these are unset - no cloud credentials
+          # are configured or required here.
+        run: |
+          mkdir -p "${TEST_OUTPUT}"
+          ./scripts/pytest test_runner/regress \
+            --dist=loadgroup -n4 --reruns 2 \
+            --tb=short --verbose -rA
+
+      - name: Upload test output on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa9 # v4.6.2
+        with:
+          name: test-output-${{ env.PG_VERSION }}
+          path: /tmp/test_output
+          retention-days: 7

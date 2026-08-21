@@ -39,10 +39,11 @@ defaults:
 
 jobs:
   create-release-pr:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
 
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -59,10 +60,52 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # Replaces the upstream `neondatabase/dev-actions/release-pr` composite action, which is a
+      # private/internal action not available to forks. This is a minimal, self-contained
+      # re-implementation: it opens a PR from `main` into the release branch, or, when
+      # `cherry-pick` commits are given, creates a hotfix branch off the release branch instead.
       - name: Create release PR
-        uses: neondatabase/dev-actions/release-pr@290dec821d86fa8a93f019e8c69720f5865b5677
-        with:
-          component: ${{ inputs.component }}
-          cherry-pick: ${{ inputs.cherry-pick }}
+        id: release-pr
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPONENT: ${{ inputs.component }}
+          CHERRY_PICK: ${{ inputs.cherry-pick }}
+        run: |
+          case "${COMPONENT}" in
+            storage) RELEASE_BRANCH="release" ;;
+            proxy)   RELEASE_BRANCH="release-proxy" ;;
+            compute) RELEASE_BRANCH="release-compute" ;;
+            *)
+              echo "Unknown component: ${COMPONENT}" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "${CHERRY_PICK}" ]; then
+            # Hotfix: branch off the release branch and cherry-pick the requested commits.
+            HEAD_BRANCH="${COMPONENT}-hotfix-$(date -u +%Y%m%d%H%M%S)"
+            git checkout -b "${HEAD_BRANCH}" "origin/${RELEASE_BRANCH}"
+
+            for commit in ${CHERRY_PICK}; do
+              git cherry-pick "${commit}"
+            done
+
+            git push origin "${HEAD_BRANCH}"
+            TITLE="Hotfix ${COMPONENT} release: cherry-pick ${CHERRY_PICK}"
+          else
+            HEAD_BRANCH="main"
+            TITLE="Release ${COMPONENT}"
+          fi
+
+          EXISTING_PR=$(gh pr list --repo "${GITHUB_REPOSITORY}" --base "${RELEASE_BRANCH}" --head "${HEAD_BRANCH}" --state open --json number --jq '.[0].number' || true)
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "PR #${EXISTING_PR} already open from ${HEAD_BRANCH} into ${RELEASE_BRANCH}, nothing to do"
+            exit 0
+          fi
+
+          gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base "${RELEASE_BRANCH}" \
+            --head "${HEAD_BRANCH}" \
+            --title "${TITLE}" \
+            --body "Automated release PR for **${COMPONENT}**, created by the \`release.yml\` workflow."

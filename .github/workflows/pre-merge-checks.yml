@@ -124,6 +124,7 @@ jobs:
     permissions:
       statuses: write # for `github.repos.createCommitStatus(...)`
       contents: write
+      pull-requests: write # for `gh pr edit --add-label`
     needs:
       - meta
       - check-codestyle-python
@@ -172,6 +173,6 @@ jobs:
             && contains(fromJSON('["release", "release-proxy", "release-compute"]'), needs.meta.outputs.branch)
           }}
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           gh pr edit ${{ needs.meta.outputs.pr-number }} --repo "${GITHUB_REPOSITORY}" --add-label "fast-forward"

@@ -25,13 +25,13 @@ jobs:
             )
           }}
 
-    runs-on: [self-hosted, small]
+    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
 
     permissions:
       packages: read
 
     container:
-      image: ${{ inputs.build-tools-image || 'ghcr.io/neondatabase/build-tools:pinned' }}
+      image: ${{ inputs.build-tools-image || format('ghcr.io/{0}/build-tools:pinned', github.repository_owner) }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -55,7 +55,7 @@ jobs:
         run: cargo deny check --hide-inclusion-graph $CARGO_DENY_TARGET
 
       - name: Post to a Slack channel
-        if: ${{ github.event_name == 'schedule' && failure() }}
+        if: ${{ github.event_name == 'schedule' && failure() && vars.SLACK_ON_CALL_DEVPROD_STREAM != '' }}
         uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: chat.postMessage

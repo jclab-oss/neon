@@ -20,7 +20,6 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  id-token: write # aws-actions/configure-aws-credentials
   statuses: write
   contents: read
 
@@ -31,7 +30,7 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: small
+    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -57,6 +56,7 @@ jobs:
       - name: Test extension upgrade
         timeout-minutes: 60
         env:
+          REPOSITORY: ghcr.io/${{ github.repository_owner }}
           NEW_COMPUTE_TAG: latest
           OLD_COMPUTE_TAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
           TEST_EXTENSIONS_TAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
@@ -71,7 +71,7 @@ jobs:
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
       - name: Post to the Slack channel
-        if: ${{ github.event.schedule && failure() }}
+        if: ${{ github.event.schedule && failure() && vars.SLACK_ON_CALL_QA_STAGING_STREAM != '' }}
         uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
         with:
           channel-id: ${{ vars.SLACK_ON_CALL_QA_STAGING_STREAM }}

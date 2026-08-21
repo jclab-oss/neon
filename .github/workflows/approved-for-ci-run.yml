@@ -59,7 +59,7 @@ jobs:
 
     permissions:
       pull-requests: write # for `gh pr edit`
-      # For `git push` and `gh pr create` we use CI_ACCESS_TOKEN
+      # For `git push` and `gh pr create` we use a token minted from the GH_AUTOBOT GitHub App
 
     if: |
       github.event.action == 'labeled' &&
@@ -73,17 +73,24 @@ jobs:
         with:
           egress-policy: audit
 
+      - name: Generate a token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.GH_AUTOBOT_CLIENT_ID }}
+          private-key: ${{ secrets.GH_AUTOBOT_PRIVATE_KEY }}
+
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          token: ${{ secrets.CI_ACCESS_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Look for existing PR
         id: get-pr
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
           echo "ALREADY_CREATED=${ALREADY_CREATED}" >> ${GITHUB_OUTPUT}
@@ -93,7 +100,7 @@ jobs:
         if: steps.get-pr.outputs.ALREADY_CREATED != ''
         env:
           ALREADY_CREATED: ${{ steps.get-pr.outputs.ALREADY_CREATED }}
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view ${ALREADY_CREATED} --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) | sort) \
           <(gh pr --repo ${GITHUB_REPOSITORY} view ${PR_NUMBER} --json labels --jq '.labels.[].name' | ( grep -E '^run' || true ) | sort ) |\
@@ -112,7 +119,7 @@ jobs:
       - name: Create a Pull Request for CI run (if required)
         if: steps.get-pr.outputs.ALREADY_CREATED == ''
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           cat << EOF > body.md
             This Pull Request is created automatically to run the CI pipeline for #${PR_NUMBER}

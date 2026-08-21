@@ -18,9 +18,16 @@ jobs:
         with:
           egress-policy: audit
 
+      - name: Generate a token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.GH_AUTOBOT_CLIENT_ID }}
+          private-key: ${{ secrets.GH_AUTOBOT_PRIVATE_KEY }}
+
       - name: Remove fast-forward label to PR
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh pr edit ${{ github.event.pull_request.number }} --repo "${GITHUB_REPOSITORY}" --remove-label "fast-forward"
 
@@ -31,12 +38,12 @@ jobs:
         with:
           merge: true
           comment: on-error
-          github_token: ${{ secrets.CI_ACCESS_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
 
       - name: Comment if mergeable_state is not clean
         if: ${{ !contains(fromJSON('["clean", "unstable"]'), github.event.pull_request.mergeable_state) }}
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} \
             --repo "${GITHUB_REPOSITORY}" \
