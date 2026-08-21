@@ -89,17 +89,28 @@ jobs:
       # Raise locked memory limit for tokio-epoll-uring, see
       # https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
       #
-      # `--user root`: the build-tools image runs as `nonroot` (uid 1000), but a
-      # GitHub-hosted runner owns its work/_temp dirs as uid 1001, so actions that
-      # write runner file commands (checkout, cache, ...) fail with EACCES. Neon's
-      # own CI doesn't hit this because its self-hosted runners use uid 1000.
-      options: --init --user root --shm-size=512mb --ulimit memlock=67108864:67108864
+      # `--user 1001:1001`: the build-tools image runs as `nonroot` (uid 1000), but a
+      # GitHub-hosted runner owns /__w, /__w/_temp and /github/home as uid 1001 (the
+      # `runner` user), so actions writing runner file commands (checkout, cache, ...)
+      # fail with EACCES. Neon's own CI doesn't hit this because its self-hosted
+      # runners use uid 1000. Running as uid 1001 fixes those writes while staying
+      # non-root, which the postgres-based tests require ("initdb: error: cannot be
+      # run as root"). The rust/python toolchains under /home/nonroot are only read,
+      # and the dirs that get written (CARGO_HOME, target/, HOME) are all uid-1001 owned.
+      options: --init --user 1001:1001 --shm-size=512mb --ulimit memlock=67108864:67108864
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
         with:
           egress-policy: audit
+
+      # The container user has to be both non-root and the owner of the runner-managed
+      # dirs; print what we actually got so a mismatch is obvious from the log.
+      - name: Show container user and runner dir ownership
+        run: |
+          id
+          stat -c '%n uid=%u gid=%g mode=%a' /__w /__w/_temp /github/home
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
