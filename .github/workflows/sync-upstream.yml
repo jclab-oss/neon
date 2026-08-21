@@ -1,0 +1,119 @@
+name: Sync upstream
+
+# Daily sync from the upstream repo's default branch: mirror it into a local `upstream-main`
+# branch, open/refresh a "Sync upstream" PR from `upstream-main` into `main`, and merge it
+# automatically when it's conflict-free. If upstream and this fork's `main` have diverged in a
+# way that conflicts (for example, both touching the same file under .github/workflows/), the
+# PR is left open for manual conflict resolution instead of being force-merged.
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # once a day
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'neondatabase/neon' }}
+  UPSTREAM_BRANCH: ${{ vars.UPSTREAM_BRANCH || 'main' }}
+  SYNC_BRANCH: upstream-main
+  BASE_BRANCH: main
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  sync-upstream:
+    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-24.04' }}
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - name: Generate a token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.GH_AUTOBOT_CLIENT_ID }}
+          private-key: ${{ secrets.GH_AUTOBOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}"
+
+      - name: Update ${{ env.SYNC_BRANCH }} branch
+        run: |
+          git push origin "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${SYNC_BRANCH}" --force
+
+      - name: Check for new upstream commits
+        id: diff
+        run: |
+          ahead=$(git rev-list --count "origin/${BASE_BRANCH}..upstream/${UPSTREAM_BRANCH}")
+          echo "ahead=${ahead}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Create or find the sync PR
+        if: steps.diff.outputs.ahead != '0'
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          number=$(gh pr list --repo "${GITHUB_REPOSITORY}" --base "${BASE_BRANCH}" --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number')
+
+          if [ -z "${number}" ]; then
+            gh pr create --repo "${GITHUB_REPOSITORY}" \
+              --base "${BASE_BRANCH}" \
+              --head "${SYNC_BRANCH}" \
+              --title "Sync upstream/${UPSTREAM_BRANCH} ($(date -u +%Y-%m-%d))" \
+              --body "Automated sync of \`${UPSTREAM_BRANCH}\` from [${UPSTREAM_REPO}](https://github.com/${UPSTREAM_REPO}), created by the \`sync-upstream.yml\` workflow. Merged automatically once it's conflict-free; otherwise it needs manual conflict resolution."
+            number=$(gh pr list --repo "${GITHUB_REPOSITORY}" --base "${BASE_BRANCH}" --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number')
+          else
+            echo "Reusing existing sync PR #${number}"
+          fi
+
+          echo "number=${number}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Merge the sync PR if it's conflict-free
+        if: steps.diff.outputs.ahead != '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          mergeable=UNKNOWN
+          for _ in $(seq 1 10); do
+            mergeable=$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json mergeable --jq .mergeable)
+            [ "${mergeable}" != "UNKNOWN" ] && break
+            sleep 5
+          done
+
+          merge_state=$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json mergeStateStatus --jq .mergeStateStatus)
+          echo "mergeable=${mergeable} mergeStateStatus=${merge_state}"
+
+          # See https://docs.github.com/en/graphql/reference/enums#mergestatestatus
+          if [ "${mergeable}" = "MERGEABLE" ] && [[ "${merge_state}" =~ ^(CLEAN|UNSTABLE|HAS_HOOKS)$ ]]; then
+            gh pr merge "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --merge
+          else
+            gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --body "Not auto-merging: \`mergeable\` is \`${mergeable}\`, \`mergeStateStatus\` is \`${merge_state}\`. Please resolve conflicts (or wait for required checks) and merge manually."
+            echo "PR #${PR_NUMBER} is not cleanly mergeable, left open for manual resolution."
+          fi

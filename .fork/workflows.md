@@ -48,9 +48,9 @@ workflows run.
 
 ### GitHub App bot token
 
-`fast-forward.yml`, `label-for-external-users.yml`, and `approved-for-ci-run.yml` need to push
-commits / open PRs / call the org-membership API in a way that itself triggers further Actions
-runs — something the default `GITHUB_TOKEN` cannot do (to prevent infinite loops, pushes and PRs
+`fast-forward.yml`, `label-for-external-users.yml`, `approved-for-ci-run.yml`, and
+`sync-upstream.yml` need to push commits / open PRs / merge PRs in a way that itself triggers
+further Actions runs — something the default `GITHUB_TOKEN` cannot do (to prevent infinite loops, pushes and PRs
 made with `GITHUB_TOKEN` never trigger other workflow runs). These workflows mint a short-lived
 token from a GitHub App at the start of each job:
 
@@ -120,6 +120,17 @@ disabled and replaced with two new, much smaller workflows:
 - No performance/benchmark reporting, no Allure test reporting — failures surface as failed CI
   jobs plus an uploaded `test-output` artifact on failure.
 
+### Fork maintenance
+
+| Workflow | Role |
+|---|---|
+| `sync-upstream.yml` | New. Runs daily (and on demand). Fetches `${{ vars.UPSTREAM_REPO \|\| 'neondatabase/neon' }}`'s `${{ vars.UPSTREAM_BRANCH \|\| 'main' }}` branch and force-pushes it to a local `upstream-main` branch, then opens (or reuses) a "Sync upstream/main" PR from `upstream-main` into `main`. If the PR's `mergeable`/`mergeStateStatus` come back clean, it's merged immediately with a merge commit (preserving upstream history); otherwise the PR is left open with a comment explaining why, for manual conflict resolution. Uses a GitHub App token (see "GitHub App bot token" above) so the merge itself triggers downstream CI on `main`. |
+
+Because this fork's `main` has diverged from upstream (workflow files were moved/rewritten,
+see above), a sync can hit real merge conflicts whenever upstream also touches
+`.github/workflows/*` — that's expected, and `sync-upstream.yml` deliberately does not force
+through a conflicted merge.
+
 ## Disabled workflows (`.github/workflows-disabled/`)
 
 Moving a workflow file out of `.github/workflows/` is what actually disables it (GitHub Actions
@@ -157,12 +168,13 @@ reporting databases, or dedicated benchmark hardware that a fork does not have.
 ## Required repository configuration for a fork owner
 
 - **Secrets**: `GH_AUTOBOT_CLIENT_ID` and `GH_AUTOBOT_PRIVATE_KEY` (see "GitHub App bot token"
-  above) if you want `fast-forward.yml`, `label-for-external-users.yml`, and
-  `approved-for-ci-run.yml` to work. `GITHUB_TOKEN` (built in) is sufficient for everything else
-  that remains enabled.
-- **Variables** (all optional — every one has a GitHub-hosted default):
+  above) if you want `fast-forward.yml`, `label-for-external-users.yml`,
+  `approved-for-ci-run.yml`, and `sync-upstream.yml` to work. `GITHUB_TOKEN` (built in) is
+  sufficient for everything else that remains enabled.
+- **Variables** (all optional — every one has a default):
   `RUNNER_DEFAULT`, `RUNNER_BUILD_TOOLS`, `RUNNER_BUILD_TOOLS_ARM64`, `RUNNER_RUST_CHECK`,
   `RUNNER_RUST_CHECK_ARM64`, `RUNNER_MACOS`, `RUNNER_BUILD_AND_TEST`, `RUNNER_DOCKER_BUILD`,
+  `UPSTREAM_REPO` (default `neondatabase/neon`), `UPSTREAM_BRANCH` (default `main`),
   `SLACK_ON_CALL_DEVPROD_STREAM`, `SLACK_ON_CALL_QA_STAGING_STREAM` (only needed to re-enable
   the optional Slack notifications in `cargo-deny.yml` / `force-test-extensions-upgrade.yml`).
 - **Packages**: ensure the repository is allowed to publish GitHub Container Registry (GHCR)
