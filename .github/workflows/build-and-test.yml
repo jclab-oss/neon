@@ -97,7 +97,15 @@ jobs:
       # non-root, which the postgres-based tests require ("initdb: error: cannot be
       # run as root"). The rust/python toolchains under /home/nonroot are only read,
       # and the dirs that get written (CARGO_HOME, target/, HOME) are all uid-1001 owned.
-      options: --init --user 1001:1001 --shm-size=512mb --ulimit memlock=67108864:67108864
+      #
+      # `--security-opt seccomp=unconfined` + the raised nofile limit match the options
+      # upstream uses on the job that runs these tests. Docker's default seccomp profile
+      # blocks the io_uring syscalls, so the pageserver tests pinned to the
+      # tokio-epoll-uring IO engine abort ("creating tokio-epoll-uring fails with EPERM").
+      options: >-
+        --init --user 1001:1001 --shm-size=512mb
+        --ulimit memlock=67108864:67108864 --ulimit nofile=65536:65536
+        --security-opt seccomp=unconfined
       # uid 1001 has no /etc/passwd entry in the image, and initdb insists on resolving
       # its own euid ("could not look up effective user ID 1001: user does not exist").
       # The host's passwd file is where uid 1001 (`runner`) is defined, so expose it.
