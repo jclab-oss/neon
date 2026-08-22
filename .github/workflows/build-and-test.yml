@@ -70,7 +70,9 @@ jobs:
   build-and-test:
     needs: [ build-build-tools-image ]
     runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
-    timeout-minutes: 120
+    # Build is ~9 min; the rest is the regress suite, which owns the 180 min step
+    # budget below. Keep some headroom on top of that for a cold cargo/pg cache.
+    timeout-minutes: 210
 
     permissions:
       contents: read
@@ -126,6 +128,10 @@ jobs:
           stat -c '%n uid=%u gid=%g mode=%a' /__w /__w/_temp /github/home
           # Must resolve, or initdb refuses to start.
           getent passwd "$(id -u)" || { echo "FATAL: uid $(id -u) not in /etc/passwd"; exit 1; }
+          # pytest scales its worker count off nproc, and each worker runs its own
+          # pageserver + safekeeper + postgres, so record what we're sizing against.
+          echo "nproc=$(nproc)"
+          free -g || true
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -194,10 +200,21 @@ jobs:
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           # Real S3/Azure-backed tests self-skip when these are unset - no cloud credentials
           # are configured or required here.
+        # The regress suite is the long pole of this job by far: the build finishes in
+        # ~9 minutes, this used to run for 1h51m and only reach 40%. Upstream gives this
+        # step alone 180 minutes for a debug build (75 for release), and runs it with
+        # -n12, so match the shape of that: scale the worker count to the runner instead
+        # of hardcoding 4, and give it a real budget.
+        #
+        # `--session-timeout` is 10 minutes under `timeout-minutes` so pytest stops
+        # itself and still writes a report, rather than being killed mid-run with no
+        # indication of which tests were slow.
+        timeout-minutes: 180
         run: |
           mkdir -p "${TEST_OUTPUT}"
           ./scripts/pytest test_runner/regress \
-            --dist=loadgroup -n4 --reruns 2 \
+            --dist=loadgroup -n"$(nproc)" --reruns 2 \
+            --session-timeout=10200 \
             --tb=short --verbose -rA
 
       - name: Upload test output on failure
