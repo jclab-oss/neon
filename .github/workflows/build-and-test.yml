@@ -98,6 +98,11 @@ jobs:
       # run as root"). The rust/python toolchains under /home/nonroot are only read,
       # and the dirs that get written (CARGO_HOME, target/, HOME) are all uid-1001 owned.
       options: --init --user 1001:1001 --shm-size=512mb --ulimit memlock=67108864:67108864
+      # uid 1001 has no /etc/passwd entry in the image, and initdb insists on resolving
+      # its own euid ("could not look up effective user ID 1001: user does not exist").
+      # The host's passwd file is where uid 1001 (`runner`) is defined, so expose it.
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -111,6 +116,8 @@ jobs:
         run: |
           id
           stat -c '%n uid=%u gid=%g mode=%a' /__w /__w/_temp /github/home
+          # Must resolve, or initdb refuses to start.
+          getent passwd "$(id -u)" || { echo "FATAL: uid $(id -u) not in /etc/passwd"; exit 1; }
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
