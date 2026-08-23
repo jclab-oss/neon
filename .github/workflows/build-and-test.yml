@@ -133,6 +133,29 @@ jobs:
           echo "nproc=$(nproc)"
           free -g || true
 
+          # Diagnose the wal_craft failures seen on the 16x runner but not the 8x one:
+          # PostgresServer::kill() got EACCES(13) from Child::kill(), which is kill(2) --
+          # a syscall POSIX does not allow to return EACCES at all. Something is
+          # mediating signals; AppArmor is the prime suspect, since it returns exactly
+          # EACCES when it denies one. Record the confinement state and probe kill(2)
+          # directly, so the next run says which it is instead of us guessing.
+          echo "--- confinement ---"
+          echo "apparmor profile: $(cat /proc/self/attr/current 2>/dev/null || echo unreadable)"
+          echo "apparmor enabled: $(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || echo unreadable)"
+          grep -E '^(Seccomp|Seccomp_filters|NoNewPrivs)' /proc/self/status || true
+          echo "--- kill(2) probe ---"
+          python3 -c "
+          import os, signal, subprocess, time
+          p = subprocess.Popen(['sleep', '30'])
+          time.sleep(0.3)
+          try:
+              os.kill(p.pid, signal.SIGKILL)
+              print('kill(own child) -> OK')
+          except OSError as e:
+              print('kill(own child) -> errno=%d (%s)' % (e.errno, e.strerror))
+          p.wait()
+          " || echo "probe itself failed"
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
