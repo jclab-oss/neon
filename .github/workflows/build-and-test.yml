@@ -82,6 +82,14 @@ jobs:
       # Keep cargo's home inside the workspace so the `Cache cargo deps` step below
       # caches the same directory that the build actually uses.
       CARGO_HOME: ${{ github.workspace }}/.cargo
+      # The test suite needs features that are off by default, so pass the same flags
+      # upstream passes to every cargo subcommand. pageserver's `testing` enables
+      # test-only APIs and the fail_point! macro, which a large part of the regress
+      # suite drives; proxy's `testing` enables the auth backends the test fixture
+      # uses - without it proxy rejects the fixture's arguments and exits with code
+      # 2 ("Proxy exited unexpectedly"), failing every test_proxy case. `rest_broker`
+      # resolves against the in-tree subzero_core stub, so it needs no private access.
+      CARGO_FLAGS: --locked --features testing,rest_broker
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
@@ -192,16 +200,16 @@ jobs:
           key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
       - name: Build Postgres + Neon (make all)
-        run: mold -run make all -j$(nproc) CARGO_BUILD_FLAGS="--locked"
+        run: mold -run make all -j$(nproc) CARGO_BUILD_FLAGS="$CARGO_FLAGS"
 
       - name: Build walproposer-lib
         run: mold -run make walproposer-lib -j$(nproc)
 
       - name: Build test binaries
-        run: mold -run cargo build --locked --tests
+        run: mold -run cargo build $CARGO_FLAGS --tests
 
       - name: Run cargo doctests
-        run: cargo test --doc --locked
+        run: cargo test --doc $CARGO_FLAGS
 
       - name: Run cargo nextest (non-pageserver crates)
         env:
@@ -212,7 +220,7 @@ jobs:
           # no self-skip path: it panics on a missing GCS_TEST_BUCKET rather than
           # returning early, so it can't run without real GCS credentials. Upstream
           # only ever runs the real-cloud suites in dedicated, credentialed steps.
-          cargo nextest run --locked -E '!package(pageserver) & !binary(test_real_gcs)'
+          cargo nextest run $CARGO_FLAGS -E '!package(pageserver) & !binary(test_real_gcs)'
 
       - name: Run cargo nextest (pageserver)
         env:
@@ -220,7 +228,7 @@ jobs:
           NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE: tokio-epoll-uring
         run: |
           export LD_LIBRARY_PATH="$(pwd)/pg_install/${PG_VERSION}/lib"
-          cargo nextest run --locked -E 'package(pageserver)'
+          cargo nextest run $CARGO_FLAGS -E 'package(pageserver)'
 
       - name: Install Python deps
         run: ./scripts/pysync
