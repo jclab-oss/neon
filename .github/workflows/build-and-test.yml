@@ -104,10 +104,21 @@ jobs:
       # upstream uses on the job that runs these tests. Docker's default seccomp profile
       # blocks the io_uring syscalls, so the pageserver tests pinned to the
       # tokio-epoll-uring IO engine abort ("creating tokio-epoll-uring fails with EPERM").
+      #
+      # `--security-opt apparmor=unconfined`: on a nested runner this container's
+      # AppArmor label comes out stacked, e.g. `docker-default//&unconfined`, while
+      # the docker-default profile only permits `signal (send,receive)
+      # peer=@{profile_name}` - i.e. a peer labelled exactly `docker-default`. The
+      # stacked label doesn't match, AppArmor denies the signal, and AppArmor reports
+      # a denial as EACCES, so every Child::kill() fails with "Permission denied"
+      # (code 13) - a value kill(2) is not otherwise allowed to return. That killed
+      # the 12 wal_craft tests that stop a postgres server; they pass on a runner
+      # whose label is plain `docker-default`.
       options: >-
         --init --user 1001:1001 --shm-size=512mb
         --ulimit memlock=67108864:67108864 --ulimit nofile=65536:65536
         --security-opt seccomp=unconfined
+        --security-opt apparmor=unconfined
       # uid 1001 has no /etc/passwd entry in the image, and initdb insists on resolving
       # its own euid ("could not look up effective user ID 1001: user does not exist").
       # The host's passwd file is where uid 1001 (`runner`) is defined, so expose it.
