@@ -244,17 +244,41 @@ jobs:
         # itself and still writes a report, rather than being killed mid-run with no
         # indication of which tests were slow.
         timeout-minutes: 180
+        #
+        # No `--reruns`: pytest-rerunfailures reacts to an xdist worker crash by
+        # calling sched.mark_test_pending(), which --dist=loadgroup's scheduler does
+        # not implement. One worker dying therefore raises NotImplementedError inside
+        # pytest itself (INTERNALERROR, exit 3) and takes the whole session down - it
+        # aborted a run at 14% after a single worker went "node down". Losing retries
+        # for flaky tests is far cheaper than losing the other 86% of the suite.
+        # `--dist=loadgroup` has to stay: it keeps @pytest.mark.xdist_group tests on
+        # one worker so @pytest.mark.order works.
         run: |
           mkdir -p "${TEST_OUTPUT}"
           ./scripts/pytest test_runner/regress \
-            --dist=loadgroup -n"$(nproc)" --reruns 2 \
+            --dist=loadgroup -n"$(nproc)" \
             --session-timeout=10200 \
             --tb=short --verbose -rA
+
+      # upload-artifact walks the tree and then stats each file, so anything that
+      # disappears in between fails the whole upload. The test output is a live
+      # pageserver repo dir, and its `ephemeral-*` files get cleaned up as tenants
+      # shut down, which is exactly that race:
+      #   ENOENT: ... stat '/tmp/test_output/.../timelines/.../ephemeral-8'
+      # Collapse it into one archive first so the upload sees a single stable file.
+      # tar can still trip over files vanishing mid-read, so ignore those too.
+      - name: Archive test output on failure
+        if: failure()
+        run: |
+          tar czf /tmp/test-output.tgz --ignore-failed-read \
+            --warning=no-file-changed --warning=no-file-removed \
+            -C /tmp test_output || true
+          ls -l /tmp/test-output.tgz || echo "no archive produced"
 
       - name: Upload test output on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-output-${{ env.PG_VERSION }}
-          path: /tmp/test_output
+          path: /tmp/test-output.tgz
           retention-days: 7
