@@ -34,6 +34,17 @@ config-variables:
   - PREWARM_PROJECT_ID
   - REMOTE_STORAGE_AZURE_CONTAINER
   - REMOTE_STORAGE_AZURE_REGION
+  # Optional per-purpose runner overrides for this fork: each defaults to a
+  # GitHub-hosted runner when unset, so a fork owner can opt into larger or
+  # self-hosted runners without editing the workflows.
+  - RUNNER_BUILD_AND_TEST
+  - RUNNER_BUILD_TOOLS
+  - RUNNER_BUILD_TOOLS_ARM64
+  - RUNNER_DEFAULT
+  - RUNNER_DOCKER_BUILD
+  - RUNNER_MACOS
+  - RUNNER_RUST_CHECK
+  - RUNNER_RUST_CHECK_ARM64
   - SLACK_CICD_CHANNEL_ID
   - SLACK_COMPUTE_CHANNEL_ID
   - SLACK_ON_CALL_DEVPROD_STREAM
@@ -46,3 +57,6 @@ config-variables:
   - SLACK_RUST_CHANNEL_ID
   - SLACK_STORAGE_CHANNEL_ID
   - SLACK_UPCOMING_RELEASE_CHANNEL_ID
+  # Used by sync-upstream.yml to point the daily sync at a different fork parent.
+  - UPSTREAM_BRANCH
+  - UPSTREAM_REPO

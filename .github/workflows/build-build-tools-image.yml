@@ -92,6 +92,22 @@ jobs:
     needs: [ check-image ]
     if: needs.check-image.outputs.found == 'false'
 
+    # build-and-test.yml and docker-publish.yml both call this workflow on the same
+    # push, so two identical build-image jobs started seconds apart and raced to
+    # reserve the same type=gha cache keys, both dying with
+    #   ERROR: failed to solve: error writing layer blob: failed to reserve cache
+    # That is a key-conflict from the cache API, not a capacity problem - raising the
+    # cache size does not help. It only became frequent once the cache was emptied,
+    # because then both jobs upload every layer instead of mostly hitting cache.
+    #
+    # Serialise per image tag (and per matrix cell, so architectures still build in
+    # parallel). The second caller waits, then builds almost entirely from the cache
+    # the first one just wrote, which also removes the duplicate ~40 min build.
+    # cancel-in-progress must stay false, or the two callers would cancel each other.
+    concurrency:
+      group: build-tools-image-${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
+      cancel-in-progress: false
+
     strategy:
       matrix:
         arch: ${{ fromJSON(needs.check-image.outputs.archs) }}
