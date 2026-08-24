@@ -93,17 +93,11 @@ jobs:
     if: needs.check-image.outputs.found == 'false'
 
     # build-and-test.yml and docker-publish.yml both call this workflow on the same
-    # push, so two identical build-image jobs started seconds apart and raced to
-    # reserve the same type=gha cache keys, both dying with
-    #   ERROR: failed to solve: error writing layer blob: failed to reserve cache
-    # That is a key-conflict from the cache API, not a capacity problem - raising the
-    # cache size does not help. It only became frequent once the cache was emptied,
-    # because then both jobs upload every layer instead of mostly hitting cache.
-    #
-    # Serialise per image tag (and per matrix cell, so architectures still build in
-    # parallel). The second caller waits, then builds almost entirely from the cache
-    # the first one just wrote, which also removes the duplicate ~40 min build.
-    # cancel-in-progress must stay false, or the two callers would cancel each other.
+    # push, so two identical build-image jobs start seconds apart. Serialise them per
+    # image tag (and per matrix cell, so architectures still build in parallel): the
+    # second caller waits, then builds almost entirely from the registry cache the
+    # first one just wrote, removing a duplicate ~40 min build. cancel-in-progress
+    # must stay false, or the two callers would cancel each other.
     concurrency:
       group: build-tools-image-${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
       cancel-in-progress: false
@@ -154,8 +148,18 @@ jobs:
           pull: true
           build-args: |
             DEBIAN_VERSION=${{ matrix.debian }}
-          cache-from: type=gha,scope=build-tools-${{ matrix.debian }}-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=build-tools-${{ matrix.debian }}-${{ matrix.arch }}
+          # Registry cache, not type=gha. buildkit's gha backend stores every layer
+          # under a global, scope-less `buildkit-blob-1-sha256:<digest>` key. When the
+          # scoped index cache is evicted but those blobs survive, cache-from misses
+          # (full rebuild) and cache-to then tries to re-reserve blob keys that still
+          # exist, which the cache API rejects:
+          #   ERROR: ... error writing layer blob: failed to reserve cache
+          # Raising the cache size or renaming the scope does not help - the blob keys
+          # carry no scope. A registry cache keeps the manifest and blobs together in
+          # ghcr.io, so they cannot drift apart, and frees the 10GB GHA budget for the
+          # cargo/pg caches.
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
+          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 

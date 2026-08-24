@@ -99,8 +99,10 @@ jobs:
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm-x64
             GIT_VERSION=${{ github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-          cache-from: type=gha,scope=neon-image
-          cache-to: type=gha,mode=max,scope=neon-image
+          # Registry cache instead of type=gha; see build-build-tools-image.yml for
+          # why the gha backend's scope-less blob keys cause "failed to reserve cache".
+          cache-from: type=registry,ref=${{ env.IMAGE_REPO }}/neon:cache
+          cache-to: type=registry,mode=max,ref=${{ env.IMAGE_REPO }}/neon:cache
           tags: |
             ${{ env.IMAGE_REPO }}/neon:${{ needs.tag.outputs.build-tag }}
             ${{ github.ref == 'refs/heads/main' && format('{0}/neon:latest', env.IMAGE_REPO) || '' }}
@@ -162,8 +164,10 @@ jobs:
             PG_VERSION=${{ matrix.pg-version }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             DEBIAN_VERSION=${{ steps.debian.outputs.debian }}
-          cache-from: type=gha,scope=compute-${{ matrix.pg-version }}
-          cache-to: type=gha,mode=max,scope=compute-${{ matrix.pg-version }}
+          # Registry cache instead of type=gha; see build-build-tools-image.yml for
+          # why the gha backend's scope-less blob keys cause "failed to reserve cache".
+          cache-from: type=registry,ref=${{ env.IMAGE_REPO }}/compute-node-${{ matrix.pg-version }}:cache
+          cache-to: type=registry,mode=max,ref=${{ env.IMAGE_REPO }}/compute-node-${{ matrix.pg-version }}:cache
           tags: |
             ${{ env.IMAGE_REPO }}/compute-node-${{ matrix.pg-version }}:${{ needs.tag.outputs.build-tag }}
             ${{ github.ref == 'refs/heads/main' && format('{0}/compute-node-{1}:latest', env.IMAGE_REPO, matrix.pg-version) || '' }}
