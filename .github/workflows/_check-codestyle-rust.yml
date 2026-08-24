@@ -27,8 +27,8 @@ jobs:
     runs-on: >-
       ${{
         matrix.arch == 'arm64'
-          && (vars.RUNNER_RUST_CHECK_ARM64 || 'ubuntu-24.04-arm')
-          || (vars.RUNNER_RUST_CHECK || 'ubuntu-22.04')
+          && (startsWith(vars.RUNNER_RUST_CHECK_ARM64, 'cirun-') && format('{0}--{1}', vars.RUNNER_RUST_CHECK_ARM64, github.run_id) || vars.RUNNER_RUST_CHECK_ARM64 || 'ubuntu-24.04-arm')
+          || (startsWith(vars.RUNNER_RUST_CHECK, 'cirun-') && format('{0}--{1}', vars.RUNNER_RUST_CHECK, github.run_id) || vars.RUNNER_RUST_CHECK || 'ubuntu-22.04')
       }}
 
     permissions:

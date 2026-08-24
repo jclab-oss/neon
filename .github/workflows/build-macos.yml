@@ -39,7 +39,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 60
-    runs-on: ${{ vars.RUNNER_MACOS || 'macos-15' }}
+    runs-on: ${{ startsWith(vars.RUNNER_MACOS, 'cirun-') && format('{0}--{1}', vars.RUNNER_MACOS, github.run_id) || vars.RUNNER_MACOS || 'macos-15' }}
     env:
       # Use release build only, to have less debug info around
       # Hence keeping target/ (and general cache size) smaller

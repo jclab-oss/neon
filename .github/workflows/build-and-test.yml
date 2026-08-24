@@ -69,7 +69,7 @@ jobs:
 
   build-and-test:
     needs: [ build-build-tools-image ]
-    runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_BUILD_AND_TEST, 'cirun-') && format('{0}--{1}', vars.RUNNER_BUILD_AND_TEST, github.run_id) || vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
     # Build is ~9 min; the rest is the regress suite, which owns the 180 min step
     # budget below. Keep some headroom on top of that for a cold cargo/pg cache.
     timeout-minutes: 210

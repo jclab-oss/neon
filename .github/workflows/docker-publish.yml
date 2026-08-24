@@ -46,7 +46,7 @@ jobs:
 
   tag:
     needs: [ check-permissions ]
-    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_DEFAULT, 'cirun-') && format('{0}--{1}', vars.RUNNER_DEFAULT, github.run_id) || vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
     outputs:
       build-tag: ${{ steps.tag.outputs.build-tag }}
     steps:
@@ -61,7 +61,7 @@ jobs:
 
   build-and-push-storage-image:
     needs: [ build-build-tools-image, tag ]
-    runs-on: ${{ vars.RUNNER_DOCKER_BUILD || 'ubuntu-24.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_DOCKER_BUILD, 'cirun-') && format('{0}--{1}', vars.RUNNER_DOCKER_BUILD, github.run_id) || vars.RUNNER_DOCKER_BUILD || 'ubuntu-24.04' }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -109,7 +109,7 @@ jobs:
 
   build-and-push-compute-image:
     needs: [ build-build-tools-image, tag ]
-    runs-on: ${{ vars.RUNNER_DOCKER_BUILD || 'ubuntu-24.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_DOCKER_BUILD, 'cirun-') && format('{0}--{1}', vars.RUNNER_DOCKER_BUILD, github.run_id) || vars.RUNNER_DOCKER_BUILD || 'ubuntu-24.04' }}
     timeout-minutes: 180
     permissions:
       contents: read

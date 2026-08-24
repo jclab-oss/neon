@@ -30,7 +30,7 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_DEFAULT, 'cirun-') && format('{0}--{1}', vars.RUNNER_DEFAULT, github.run_id) || vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)

@@ -30,7 +30,7 @@ permissions: {}
 
 jobs:
   check-image:
-    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_DEFAULT, 'cirun-') && format('{0}--{1}', vars.RUNNER_DEFAULT, github.run_id) || vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
     outputs:
       archs: ${{ steps.set-variables.outputs.archs }}
       debians: ${{ steps.set-variables.outputs.debians }}
@@ -115,8 +115,8 @@ jobs:
     runs-on: >-
       ${{
         matrix.arch == 'arm64'
-          && (vars.RUNNER_BUILD_TOOLS_ARM64 || 'ubuntu-24.04-arm')
-          || (vars.RUNNER_BUILD_TOOLS || 'ubuntu-24.04')
+          && (startsWith(vars.RUNNER_BUILD_TOOLS_ARM64, 'cirun-') && format('{0}--{1}', vars.RUNNER_BUILD_TOOLS_ARM64, github.run_id) || vars.RUNNER_BUILD_TOOLS_ARM64 || 'ubuntu-24.04-arm')
+          || (startsWith(vars.RUNNER_BUILD_TOOLS, 'cirun-') && format('{0}--{1}', vars.RUNNER_BUILD_TOOLS, github.run_id) || vars.RUNNER_BUILD_TOOLS || 'ubuntu-24.04')
       }}
 
     steps:
@@ -165,7 +165,7 @@ jobs:
 
   merge-images:
     needs: [ check-image, build-image ]
-    runs-on: ${{ vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_DEFAULT, 'cirun-') && format('{0}--{1}', vars.RUNNER_DEFAULT, github.run_id) || vars.RUNNER_DEFAULT || 'ubuntu-22.04' }}
 
     permissions:
       packages: write
