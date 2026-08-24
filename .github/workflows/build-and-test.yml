@@ -82,14 +82,20 @@ jobs:
       # Keep cargo's home inside the workspace so the `Cache cargo deps` step below
       # caches the same directory that the build actually uses.
       CARGO_HOME: ${{ github.workspace }}/.cargo
-      # The test suite needs features that are off by default, so pass the same flags
-      # upstream passes to every cargo subcommand. pageserver's `testing` enables
-      # test-only APIs and the fail_point! macro, which a large part of the regress
-      # suite drives; proxy's `testing` enables the auth backends the test fixture
-      # uses - without it proxy rejects the fixture's arguments and exits with code
-      # 2 ("Proxy exited unexpectedly"), failing every test_proxy case. `rest_broker`
-      # resolves against the in-tree subzero_core stub, so it needs no private access.
-      CARGO_FLAGS: --locked --features testing,rest_broker
+      # The test suite needs features that are off by default. pageserver's `testing`
+      # enables test-only APIs and the fail_point! macro, which a large part of the
+      # regress suite drives; proxy's `testing` enables the auth backends the test
+      # fixture uses - without it proxy rejects the fixture's arguments and exits with
+      # code 2 ("Proxy exited unexpectedly"), failing every test_proxy case.
+      #
+      # Upstream also passes `rest_broker`, but we must NOT: that feature pulls in the
+      # real subzero-core crate from the private neondatabase/subzero repo, which this
+      # fork replaces with an empty in-tree stub (libs/proxy/subzero_core). With
+      # rest_broker on, proxy fails to compile against the stub:
+      #   error[E0432]: unresolved import `subzero_core::api`
+      # `cargo metadata` resolves it (the dep exists) but compilation does not, which
+      # is why this slipped through before. proxy builds fine with just `testing`.
+      CARGO_FLAGS: --locked --features testing
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
