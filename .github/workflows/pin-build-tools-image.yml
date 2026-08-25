@@ -45,6 +45,9 @@ jobs:
         with:
           egress-policy: audit
 
+      # cirun runners don't ship Docker; install it before `docker manifest inspect`.
+      - uses: docker/setup-docker-action@v5
+
       - name: Check if we really need to pin the image
         id: check-manifests
         env:
