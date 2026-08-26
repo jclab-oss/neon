@@ -31,8 +31,12 @@ vacuum freeze tt;
 
 -- Delete the rest of the rows, and vacuum again. This truncates the
 -- heap to 0 blocks, and should also truncate the FSM.
+-- FREEZE, not a plain VACUUM: without it the vacuum may not remove the rows
+-- at all, the heap is not truncated, and the insert below lands on a
+-- high-numbered block, so the test fails without ingest_xlog_smgr_truncate
+-- having done anything wrong. See neondatabase/neon#11361.
 delete from tt;
-vacuum tt;
+vacuum freeze tt;
 
 -- This can be used to look at the FSM directly, if the 'pg_freespace' contrib module
 -- is installed
