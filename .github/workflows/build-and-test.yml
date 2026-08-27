@@ -41,11 +41,11 @@ on:
   workflow_dispatch:
     inputs:
       pg_version:
-        description: "Postgres major version to build/test"
+        description: "Postgres major version to build/test ('all' = the full matrix)"
         required: false
-        default: "v17"
+        default: all
         type: choice
-        options: [ v14, v15, v16, v17, v18 ]
+        options: [ all, v14, v15, v16, v17, v18 ]
 
 concurrency:
   group: build-and-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -55,7 +55,6 @@ env:
   RUST_BACKTRACE: 1
   COPT: "-Werror"
   BUILD_TYPE: debug
-  PG_VERSION: ${{ inputs.pg_version || 'v17' }}
 
 permissions:
   contents: read
@@ -92,6 +91,17 @@ jobs:
   build-neon:
     needs: [ build-build-tools-image ]
     runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
+    name: build-neon (${{ matrix.pg_version }})
+
+    # One build per Postgres version, in parallel. workflow_dispatch can pin a
+    # single version; an empty input means the whole matrix.
+    #
+    # fail-fast is off so a v18 failure does not cancel v17: v18 support is new
+    # (see NEON_PG_EXT_VERSIONS in the Makefile) and is not a gate yet.
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ${{ fromJSON((!inputs.pg_version || inputs.pg_version == 'all') && '["v17","v18"]' || format('["{0}"]', inputs.pg_version)) }}
     # Build is ~9 min, the Rust test suites are the rest. The regress suite lives in
     # `regress-tests` now and has its own budget there.
     timeout-minutes: 90
@@ -101,6 +111,7 @@ jobs:
       packages: read
 
     env:
+      PG_VERSION: ${{ matrix.pg_version }}
       # Keep cargo's home inside the workspace so the `Cache cargo deps` step below
       # caches the same directory that the build actually uses.
       CARGO_HOME: ${{ github.workspace }}/.cargo
@@ -324,6 +335,20 @@ jobs:
   regress-tests:
     needs: [ build-build-tools-image, build-neon ]
     runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
+    name: regress-tests (${{ matrix.pg_version }})
+
+    # Mirrors build-neon's matrix; each entry picks up its own artifact by name.
+    # `needs` waits for every build-neon entry rather than just the matching one -
+    # that is a GitHub limitation, not intent.
+    #
+    # v18 does not gate the run. It compiles and a server starts with neon.so
+    # preloaded, but it has never run a workload against a pageserver, so treat
+    # its result as a signal and flip continue-on-error off once it is green.
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ${{ fromJSON((!inputs.pg_version || inputs.pg_version == 'all') && '["v17","v18"]' || format('["{0}"]', inputs.pg_version)) }}
+    continue-on-error: ${{ matrix.pg_version == 'v18' }}
     # The regress suite owns the 180 min step budget below; keep headroom on top for the
     # checkout and the artifact download.
     timeout-minutes: 210
@@ -331,6 +356,9 @@ jobs:
     permissions:
       contents: read
       packages: read
+
+    env:
+      PG_VERSION: ${{ matrix.pg_version }}
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
