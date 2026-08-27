@@ -7,11 +7,9 @@ POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install
 # Supported PostgreSQL versions
 POSTGRES_VERSIONS = v18 v17 v16 v15 v14
 
-# Versions the Neon extensions (pgxn/) are built for.
-#
-# v18 needs the patch in .fork/patches/ applied to vendor/postgres-v18 first: the
-# REL_18_STABLE_neon branch is missing the three block-level LwLSN hooks that
-# pgxn/neon/neon_lwlsncache.c requires. Without it this target fails to compile.
+# Versions the Neon extensions (pgxn/) are built for. Kept separate from
+# POSTGRES_VERSIONS so a version can ship a plain server before the extensions
+# build against it.
 NEON_PG_EXT_VERSIONS = v18 v17 v16 v15 v14
 
 # CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
