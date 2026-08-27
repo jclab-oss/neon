@@ -9,20 +9,10 @@ POSTGRES_VERSIONS = v18 v17 v16 v15 v14
 
 # Versions the Neon extensions (pgxn/) are built for.
 #
-# v18 is deliberately absent. PG18 replaced the `smgr_hook` that pgxn/neon installs
-# (libpagestore.c) with an smgr registry - `smgrregister()` in
-# vendor/postgres-v18/src/include/storage/smgr.h - reshaped the f_smgr vtable for the
-# new AIO subsystem, and moved smgr_start_unlogged_build / smgr_end_unlogged_build /
-# smgr_read_slru_segment out to standalone hooks. On top of that, the
-# REL_18_STABLE_neon branch does not yet carry Neon's own core patches: the LwLSN hooks
-# that pgxn/neon/neon_lwlsncache.c needs (set_lwlsn_block_hook and friends, declared in
-# vendor/postgres-v17/src/include/access/xlog.h) do not exist in v18, so that file
-# cannot compile against it no matter what we do here.
-#
-# Keeping v18 in POSTGRES_VERSIONS but out of this list gets us pg_install/v18 - which
-# is what libs/postgres_ffi/build.rs needs headers from - and a working plain PG18
-# server, without breaking `make all`.
-NEON_PG_EXT_VERSIONS = v17 v16 v15 v14
+# v18 needs the patch in .fork/patches/ applied to vendor/postgres-v18 first: the
+# REL_18_STABLE_neon branch is missing the three block-level LwLSN hooks that
+# pgxn/neon/neon_lwlsncache.c requires. Without it this target fails to compile.
+NEON_PG_EXT_VERSIONS = v18 v17 v16 v15 v14
 
 # CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
 # and `--features testing` are popular examples.

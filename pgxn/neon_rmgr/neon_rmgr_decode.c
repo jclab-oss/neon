@@ -10,6 +10,20 @@
 
 #include "neon_rmgr.h"
 
+/*
+ * PG18 renamed the reorderbuffer allocation helpers - ReorderBufferGetChange ->
+ * ReorderBufferAllocChange and ReorderBufferGetTupleBuf ->
+ * ReorderBufferAllocTupleBuf (replication/reorderbuffer.h). Same semantics, so
+ * hide the difference here rather than at all 18 call sites.
+ */
+#if PG_MAJORVERSION_NUM >= 18
+#define NEON_RB_ALLOC_CHANGE(rb)			ReorderBufferAllocChange(rb)
+#define NEON_RB_ALLOC_TUPLEBUF(rb, len)		ReorderBufferAllocTupleBuf((rb), (len))
+#else
+#define NEON_RB_ALLOC_CHANGE(rb)			ReorderBufferGetChange(rb)
+#define NEON_RB_ALLOC_TUPLEBUF(rb, len)		ReorderBufferGetTupleBuf((rb), (len))
+#endif
+
 #endif /* PG >= 16 */
 
 #if PG_MAJORVERSION_NUM == 16
@@ -111,7 +125,7 @@ DecodeNeonInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
 
-	change = ReorderBufferGetChange(ctx->reorder);
+	change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 	if (!(xlrec->flags & XLH_INSERT_IS_SPECULATIVE))
 		change->action = REORDER_BUFFER_CHANGE_INSERT;
 	else
@@ -124,7 +138,7 @@ DecodeNeonInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	tuplelen = datalen - SizeOfNeonHeapHeader;
 
 	change->data.tp.newtuple =
-		ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+		NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 	DecodeXLogTuple(tupledata, datalen, change->data.tp.newtuple);
 
@@ -159,7 +173,7 @@ DecodeNeonDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
 
-	change = ReorderBufferGetChange(ctx->reorder);
+	change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 
 	if (xlrec->flags & XLH_DELETE_IS_SUPER)
 		change->action = REORDER_BUFFER_CHANGE_INTERNAL_SPEC_ABORT;
@@ -179,7 +193,7 @@ DecodeNeonDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		Assert(XLogRecGetDataLen(r) > (SizeOfNeonHeapDelete + SizeOfNeonHeapHeader));
 
 		change->data.tp.oldtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 		DecodeXLogTuple((char *) xlrec + SizeOfNeonHeapDelete,
 						datalen, change->data.tp.oldtuple);
@@ -217,7 +231,7 @@ DecodeNeonUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
 
-	change = ReorderBufferGetChange(ctx->reorder);
+	change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 	change->action = REORDER_BUFFER_CHANGE_UPDATE;
 	change->origin_id = XLogRecGetOrigin(r);
 	memcpy(&change->data.tp.rlocator, &target_locator, sizeof(RelFileLocator));
@@ -232,7 +246,7 @@ DecodeNeonUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		tuplelen = datalen - SizeOfNeonHeapHeader;
 
 		change->data.tp.newtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 		DecodeXLogTuple(data, datalen, change->data.tp.newtuple);
 	}
@@ -248,7 +262,7 @@ DecodeNeonUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		tuplelen = datalen - SizeOfNeonHeapHeader;
 
 		change->data.tp.oldtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 		DecodeXLogTuple(data, datalen, change->data.tp.oldtuple);
 	}
@@ -309,7 +323,7 @@ DecodeNeonMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		ReorderBufferTupleBuf *tuple;
 		HeapTupleHeader header;
 
-		change = ReorderBufferGetChange(ctx->reorder);
+		change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 		change->action = REORDER_BUFFER_CHANGE_INSERT;
 		change->origin_id = XLogRecGetOrigin(r);
 
@@ -320,7 +334,7 @@ DecodeNeonMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		datalen = xlhdr->datalen;
 
 		change->data.tp.newtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, datalen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, datalen);
 
 		tuple = change->data.tp.newtuple;
 		header = tuple->tuple.t_data;
@@ -406,7 +420,14 @@ DecodeXLogTuple(char *data, Size len, ReorderBufferTupleBuf *tuple)
 }
 #endif
 
-#if PG_MAJORVERSION_NUM == 17
+/*
+ * PG18 shares the neon rmgr record format with PG17 - the format is defined by
+ * this extension, not by core, and libs/wal_decoder decodes PG16/17/18 with the
+ * same arm. This was `== 17`, which silently compiled neon_rm_decode out of
+ * neon_rmgr.so for v18: it linked fine and then failed at load time with
+ * "undefined symbol: neon_rm_decode".
+ */
+#if PG_MAJORVERSION_NUM >= 17
 
 /* individual record(group)'s handlers */
 static void DecodeNeonInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf);
@@ -505,7 +526,7 @@ DecodeNeonInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
 
-	change = ReorderBufferGetChange(ctx->reorder);
+	change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 	if (!(xlrec->flags & XLH_INSERT_IS_SPECULATIVE))
 		change->action = REORDER_BUFFER_CHANGE_INSERT;
 	else
@@ -518,7 +539,7 @@ DecodeNeonInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	tuplelen = datalen - SizeOfHeapHeader;
 
 	change->data.tp.newtuple =
-		ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+		NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 	DecodeXLogTuple(tupledata, datalen, change->data.tp.newtuple);
 
@@ -553,7 +574,7 @@ DecodeNeonDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
 
-	change = ReorderBufferGetChange(ctx->reorder);
+	change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 
 	if (xlrec->flags & XLH_DELETE_IS_SUPER)
 		change->action = REORDER_BUFFER_CHANGE_INTERNAL_SPEC_ABORT;
@@ -573,7 +594,7 @@ DecodeNeonDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		Assert(XLogRecGetDataLen(r) > (SizeOfNeonHeapDelete + SizeOfNeonHeapHeader));
 
 		change->data.tp.oldtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 		DecodeXLogTuple((char *) xlrec + SizeOfNeonHeapDelete,
 						datalen, change->data.tp.oldtuple);
@@ -611,7 +632,7 @@ DecodeNeonUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	if (FilterByOrigin(ctx, XLogRecGetOrigin(r)))
 		return;
 
-	change = ReorderBufferGetChange(ctx->reorder);
+	change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 	change->action = REORDER_BUFFER_CHANGE_UPDATE;
 	change->origin_id = XLogRecGetOrigin(r);
 	memcpy(&change->data.tp.rlocator, &target_locator, sizeof(RelFileLocator));
@@ -626,7 +647,7 @@ DecodeNeonUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		tuplelen = datalen - SizeOfNeonHeapHeader;
 
 		change->data.tp.newtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 		DecodeXLogTuple(data, datalen, change->data.tp.newtuple);
 	}
@@ -642,7 +663,7 @@ DecodeNeonUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		tuplelen = datalen - SizeOfNeonHeapHeader;
 
 		change->data.tp.oldtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, tuplelen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, tuplelen);
 
 		DecodeXLogTuple(data, datalen, change->data.tp.oldtuple);
 	}
@@ -703,7 +724,7 @@ DecodeNeonMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		HeapTuple	tuple;
 		HeapTupleHeader header;
 
-		change = ReorderBufferGetChange(ctx->reorder);
+		change = NEON_RB_ALLOC_CHANGE(ctx->reorder);
 		change->action = REORDER_BUFFER_CHANGE_INSERT;
 		change->origin_id = XLogRecGetOrigin(r);
 
@@ -714,7 +735,7 @@ DecodeNeonMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		datalen = xlhdr->datalen;
 
 		change->data.tp.newtuple =
-			ReorderBufferGetTupleBuf(ctx->reorder, datalen);
+			NEON_RB_ALLOC_TUPLEBUF(ctx->reorder, datalen);
 
 		tuple = change->data.tp.newtuple;
 		header = tuple->t_data;

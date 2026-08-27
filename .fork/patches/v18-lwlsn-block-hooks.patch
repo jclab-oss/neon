@@ -34,6 +34,95 @@ index edd58f3..b7f72ac 100644
  set_lwlsn_db_hook_type set_lwlsn_db_hook = NULL;
  set_lwlsn_relation_hook_type set_lwlsn_relation_hook = NULL;
  set_max_lwlsn_hook_type set_max_lwlsn_hook = NULL;
+diff --git a/src/backend/storage/aio/aio.c b/src/backend/storage/aio/aio.c
+index e64afe6..d0038b4 100644
+--- a/src/backend/storage/aio/aio.c
++++ b/src/backend/storage/aio/aio.c
+@@ -479,6 +479,62 @@ pgaio_io_stage(PgAioHandle *ioh, PgAioOp op)
+ 	RESUME_INTERRUPTS();
+ }
+ 
++/*
++ * NEON: stage an IO whose work the caller performs itself.
++ *
++ * This is pgaio_io_stage() without the submission half. A network-backed smgr has
++ * no file descriptor to hand to an io worker, so its smgr_startreadv does the read
++ * inline and reports the outcome with pgaio_io_complete_external() below; the
++ * handle must still travel through the normal states so that the completion
++ * callbacks bufmgr registered run as usual.
++ *
++ * Interrupts are held from here until pgaio_io_complete_external(), exactly as
++ * they are across the body of pgaio_io_stage(), so the caller must pair the two.
++ */
++void
++pgaio_io_stage_external(PgAioHandle *ioh, PgAioOp op)
++{
++	Assert(ioh->state == PGAIO_HS_HANDED_OUT);
++	Assert(pgaio_my_backend->handed_out_io == ioh);
++	Assert(pgaio_io_has_target(ioh));
++
++	HOLD_INTERRUPTS();
++
++	ioh->op = op;
++	ioh->result = 0;
++
++	pgaio_io_update_state(ioh, PGAIO_HS_DEFINED);
++
++	/* allow a new IO to be staged */
++	pgaio_my_backend->handed_out_io = NULL;
++
++	pgaio_io_call_stage(ioh);
++
++	pgaio_io_update_state(ioh, PGAIO_HS_STAGED);
++}
++
++/*
++ * NEON: report the outcome of an IO staged with pgaio_io_stage_external().
++ *
++ * `result` reaches the completion callbacks unchanged, so its units are whatever
++ * they expect: bytes if PGAIO_HCB_MD_READV is registered, blocks if no
++ * smgr-level callback is. Releases the interrupt hold taken when staging.
++ */
++void
++pgaio_io_complete_external(PgAioHandle *ioh, int result)
++{
++	Assert(ioh->state == PGAIO_HS_STAGED);
++
++	pgaio_io_prepare_submit(ioh);
++
++	/* pgaio_io_process_completion() requires a critical section */
++	START_CRIT_SECTION();
++	pgaio_io_process_completion(ioh, result);
++	END_CRIT_SECTION();
++
++	RESUME_INTERRUPTS();
++}
++
+ bool
+ pgaio_io_needs_synchronous_execution(PgAioHandle *ioh)
+ {
+diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
+index a53911a..223f6c3 100644
+--- a/src/backend/storage/smgr/smgr.c
++++ b/src/backend/storage/smgr/smgr.c
+@@ -150,7 +150,7 @@ smgrregister(const f_smgr *smgr)
+ 			continue;
+ 
+ 		/* exactly the same struct, return the previously-returned ID */
+-		if (memcmp(smgr, &smgrsw[i], sizeof(f_smgr)))
++		if (memcmp(smgr, &smgrsw[i], sizeof(f_smgr)) == 0)
+ 			return i;
+ 
+ 		/* different contents on same name, error out*/
+@@ -325,7 +325,7 @@ smgropen(RelFileLocator rlocator, ProcNumber backend, char relpersistence)
+ 
+ 			if (id != reln->smgr_which)
+ 			{
+-				for (int i = 0; i < MAX_FORKNUM; i++)
++				for (int i = 0; i <= MAX_FORKNUM; i++)
+ 					smgrsw[reln->smgr_which].smgr_close(reln, i);
+ 
+ 				/*
 diff --git a/src/backend/utils/activity/wait_event_names.txt b/src/backend/utils/activity/wait_event_names.txt
 index 3a1a20b..62362d2 100644
 --- a/src/backend/utils/activity/wait_event_names.txt
@@ -67,6 +156,21 @@ index 3bcd20d..c794a79 100644
  extern set_lwlsn_db_hook_type set_lwlsn_db_hook;
  extern set_lwlsn_relation_hook_type set_lwlsn_relation_hook;
  extern set_max_lwlsn_hook_type set_max_lwlsn_hook;
+diff --git a/src/include/storage/aio.h b/src/include/storage/aio.h
+index 2933eea..95cdd54 100644
+--- a/src/include/storage/aio.h
++++ b/src/include/storage/aio.h
+@@ -314,6 +314,10 @@ extern void pgaio_io_set_handle_data_64(PgAioHandle *ioh, uint64 *data, uint8 le
+ extern void pgaio_io_set_handle_data_32(PgAioHandle *ioh, uint32 *data, uint8 len);
+ extern uint64 *pgaio_io_get_handle_data(PgAioHandle *ioh, uint8 *len);
+ 
++/* NEON: for smgrs that perform their IO themselves; see aio.c */
++extern void pgaio_io_stage_external(PgAioHandle *ioh, PgAioOp op);
++extern void pgaio_io_complete_external(PgAioHandle *ioh, int result);
++
+ 
+ 
+ /* --------------------------------------------------------------------------------
 diff --git a/src/include/storage/lwlocklist.h b/src/include/storage/lwlocklist.h
 index 932024b..34ef932 100644
 --- a/src/include/storage/lwlocklist.h

@@ -11,9 +11,14 @@
 #include "postmaster/interrupt.h"
 #include "replication/slot.h"
 #include "storage/fd.h"
+#include "storage/latch.h"
 #include "storage/procsignal.h"
 #if PG_MAJORVERSION_NUM >= 18
-/* PG18 split the WaitEventSet API (WL_LATCH_SET etc.) out of storage/latch.h */
+/*
+ * PG18 split the WaitEventSet API (the WL_* flags) out of storage/latch.h into
+ * its own header. WaitLatch/ResetLatch stayed in latch.h, which this file used to
+ * get transitively; include both explicitly rather than rely on that.
+ */
 #include "storage/waiteventset.h"
 #endif
 #include "tcop/tcopprot.h"

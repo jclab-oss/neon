@@ -123,6 +123,10 @@
 
 #ifdef HAVE_LIBSECCOMP
 #include "neon_seccomp.h"
+#if PG_MAJORVERSION_NUM >= 18
+/* PG18 split the WaitEventSet API (WL_* flags) out of storage/latch.h */
+#include "storage/waiteventset.h"
+#endif
 #endif
 
 PG_MODULE_MAGIC;
@@ -269,8 +273,18 @@ WalRedoMain(int argc, char *argv[])
 	/*
 	 * install the simple in-memory smgr
 	 */
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * PG18: register rather than hook. Registering after md means we are asked
+	 * first (smgropen consults registered smgrs newest-first) and inmem_owns
+	 * claims everything, so all storage in this process is in memory. The
+	 * vtable's smgr_init replaces the old smgr_init_hook.
+	 */
+	smgr_register_inmem();
+#else
 	smgr_hook = smgr_inmem;
 	smgr_init_hook = smgr_init_inmem;
+#endif
 
 #if PG_VERSION_NUM >= 160000
 	/* make rmgr registry believe we can register the resource manager */
@@ -531,32 +545,56 @@ CreateFakeSharedMemoryAndSemaphores(void)
 	CommitTsShmemInit();
 	SUBTRANSShmemInit();
 	MultiXactShmemInit();
+#if PG_MAJORVERSION_NUM >= 18
+	BufferManagerShmemInit();
+#else
 	InitBufferPool();
+#endif
 
 	/*
 	 * Set up lock manager
 	 */
+#if PG_MAJORVERSION_NUM >= 18
+	LockManagerShmemInit();
+#else
 	InitLocks();
+#endif
 
 	/*
 	 * Set up predicate lock manager
 	 */
+#if PG_MAJORVERSION_NUM >= 18
+	PredicateLockShmemInit();
+#else
 	InitPredicateLocks();
+#endif
 
 	/*
 	 * Set up process table
 	 */
 	if (!IsUnderPostmaster)
 		InitProcGlobal();
+#if PG_MAJORVERSION_NUM >= 18
+	ProcArrayShmemInit();
+#else
 	CreateSharedProcArray();
+#endif
+#if PG_MAJORVERSION_NUM >= 18
+	BackendStatusShmemInit();
+#else
 	CreateSharedBackendStatus();
+#endif
 	TwoPhaseShmemInit();
 	BackgroundWorkerShmemInit();
 
 	/*
 	 * Set up shared-inval messaging
 	 */
+#if PG_MAJORVERSION_NUM >= 18
+	SharedInvalShmemInit();
+#else
 	CreateSharedInvalidationState();
+#endif
 
 	/*
 	 * Set up interprocess signaling mechanisms

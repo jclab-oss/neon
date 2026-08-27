@@ -48,6 +48,11 @@
 #include "access/xloginsert.h"
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
+#if PG_MAJORVERSION_NUM >= 18
+#include "storage/aio.h"
+/* OpenTransientFile/CloseTransientFile, for writing downloaded SLRU segments */
+#include "storage/fd.h"
+#endif
 #include "catalog/pg_class.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
@@ -103,6 +108,24 @@ static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id
 static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
 static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
+#if PG_MAJORVERSION_NUM >= 18
+static bool neon_owns(RelFileLocator rlocator, ProcNumber backend, char relpersistence);
+static inline bool neon_owns_rel(SMgrRelation reln);
+static void neon_smgr_init(void);
+#endif
+
+/*
+ * Linkage for the unlogged-build callbacks. PG18 installs them as standalone
+ * hooks from libpagestore.c, so they must be externally visible and are declared
+ * in pagestore_client.h; before PG18 they were f_smgr members and stayed file
+ * local. The storage class has to track that, or -Werror=missing-prototypes
+ * rejects a non-static definition with no visible prototype.
+ */
+#if PG_MAJORVERSION_NUM >= 18
+#define NEON_UNLOGGED_BUILD_HOOK		/* extern, declared in the header */
+#else
+#define NEON_UNLOGGED_BUILD_HOOK		static
+#endif
 
 /*
  * Wrapper around log_newpage() that makes a temporary copy of the block and
@@ -1042,7 +1065,12 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg(NEON_TAG "cannot extend file \"%s\" beyond %u blocks",
+#if PG_MAJORVERSION_NUM >= 18
+						/* PG18 returns a RelPathStr struct, not char * */
+						relpath(reln->smgr_rlocator, forkNum).str,
+#else
 						relpath(reln->smgr_rlocator, forkNum),
+#endif
 						InvalidBlockNumber)));
 
 	if (debug_compare_local)
@@ -1959,9 +1987,18 @@ neon_registersync(SMgrRelation reln, ForkNumber forknum)
  * WAL to reconstruct pages, so we cannot use the page server in the
  * first phase when the changes are not logged.
  */
-static void
+NEON_UNLOGGED_BUILD_HOOK void
 neon_start_unlogged_build(SMgrRelation reln)
 {
+	/*
+	 * PG18 turned this from a vtable entry, dispatched only for relations we
+	 * own, into a global hook that fires for md relations too, so filter here.
+	 */
+#if PG_MAJORVERSION_NUM >= 18
+	if (!neon_owns_rel(reln))
+		return;
+#endif
+
 	/*
 	 * Currently, there can be only one unlogged relation build operation in
 	 * progress at a time. That's enough for the current usage.
@@ -2028,9 +2065,18 @@ neon_start_unlogged_build(SMgrRelation reln)
  * Call this after you have finished populating a relation in unlogged mode,
  * before you start WAL-logging it.
  */
-static void
+NEON_UNLOGGED_BUILD_HOOK void
 neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 {
+	/*
+	 * PG18 turned this from a vtable entry, dispatched only for relations we
+	 * own, into a global hook that fires for md relations too, so filter here.
+	 */
+#if PG_MAJORVERSION_NUM >= 18
+	if (!neon_owns_rel(reln))
+		return;
+#endif
+
 	Assert(RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
 
 	ereport(SmgrTrace,
@@ -2064,10 +2110,20 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
  * This removes the local copy of the rel, since it's now been fully
  * WAL-logged and is present in the page server.
  */
-static void
+NEON_UNLOGGED_BUILD_HOOK void
 neon_end_unlogged_build(SMgrRelation reln)
 {
 	NRelFileInfoBackend rinfob = InfoBFromSMgrRel(reln);
+
+	/*
+	 * PG18 turned this from a vtable entry, dispatched only for relations we
+	 * own, into a global hook that fires for md relations too, so filter here.
+	 * After the declaration: -Werror=declaration-after-statement.
+	 */
+#if PG_MAJORVERSION_NUM >= 18
+	if (!neon_owns_rel(reln))
+		return;
+#endif
 
 	Assert(RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
 
@@ -2128,7 +2184,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 #define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
 
 static int
-neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buffer)
+neon_read_slru_segment_into(const char *path, int64 segno, void *buffer)
 {
 	XLogRecPtr	request_lsn,
 				not_modified_since;
@@ -2182,6 +2238,74 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	return n_blocks;
 }
 
+#if PG_MAJORVERSION_NUM >= 18
+/*
+ * PG18 changed this hook's contract: it used to hand us a (dummy) SMgrRelation
+ * and a caller-allocated buffer and take a block count back, with slru.c doing
+ * the local write. Now it is bool(path, segno) and the hook writes the file
+ * itself - slru.c just retries the open afterwards. So the write that used to
+ * live in SimpleLruDownloadSegment moves here, error handling included.
+ */
+bool
+neon_read_slru_segment(const char *path, int64 segno)
+{
+	void	   *buffer;
+	int			n_blocks;
+	int			fd;
+	bool		ok = false;
+
+	buffer = palloc(BLCKSZ * SLRU_PAGES_PER_SEGMENT);
+
+	n_blocks = neon_read_slru_segment_into(path, segno, buffer);
+	if (n_blocks <= 0)
+	{
+		pfree(buffer);
+		return false;
+	}
+
+	fd = OpenTransientFile(path, O_RDWR | O_CREAT | PG_BINARY);
+	if (fd < 0)
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg(NEON_TAG "could not create SLRU segment file \"%s\": %m", path)));
+		pfree(buffer);
+		return false;
+	}
+
+	{
+		errno = 0;
+		pgstat_report_wait_start(WAIT_EVENT_SLRU_WRITE);
+		if (pg_pwrite(fd, buffer, (size_t) n_blocks * BLCKSZ, 0) != (ssize_t) n_blocks * BLCKSZ)
+		{
+			pgstat_report_wait_end();
+			/* if write didn't set errno, assume problem is no disk space */
+			if (errno == 0)
+				errno = ENOSPC;
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg(NEON_TAG "could not write SLRU segment file \"%s\": %m", path)));
+		}
+		else
+		{
+			pgstat_report_wait_end();
+			ok = true;
+		}
+	}
+
+	CloseTransientFile(fd);
+	pfree(buffer);
+
+	return ok;
+}
+#else
+static int
+neon_read_slru_segment(SMgrRelation reln, const char *path, int segno, void *buffer)
+{
+	return neon_read_slru_segment_into(path, segno, buffer);
+}
+#endif
+
 static void
 AtEOXact_neon(XactEvent event, void *arg)
 {
@@ -2217,9 +2341,109 @@ AtEOXact_neon(XactEvent event, void *arg)
 	communicator_reconfigure_timeout_if_needed();
 }
 
+#if PG_MAJORVERSION_NUM >= 18
+/*
+ * PG18 asks each registered smgr, newest first, which one owns a relation;
+ * smgropen() is the only caller. It replaces the PG17 smgr_hook, which returned
+ * the whole vtable. Same predicate as the old smgr_neon(): temp relations have a
+ * real backend and stay on md, everything else is ours.
+ *
+ * It has to be cheap and side-effect free - it runs with interrupts held - and it
+ * has to give the same answer every time for a given relation, because PG18 asks
+ * again when a cached relation's persistence changes and will silently switch
+ * owners if the answer moved. Ignoring relpersistence is what makes that stable.
+ */
+static bool
+neon_owns(RelFileLocator rlocator, ProcNumber backend, char relpersistence)
+{
+	return backend == INVALID_PROC_NUMBER;
+}
+
+/*
+ * Convenience wrapper for the hooks below. neon_owns() ignores relpersistence, so
+ * passing 0 (unknown) is safe and avoids reaching into SMgrRelationData's private
+ * section, where PG18 moved smgr_relpersistence.
+ */
+static inline bool
+neon_owns_rel(SMgrRelation reln)
+{
+	return neon_owns(reln->smgr_rlocator.locator, reln->smgr_rlocator.backend, 0);
+}
+
+/*
+ * Largest run of blocks that may be combined into one read starting at blocknum.
+ * md answers with the distance to the end of the 1GB segment; we have no
+ * segmentation, so the only limit is how many blocks neon_readv can describe in
+ * one request.
+ */
+static uint32
+neon_maxcombine(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+{
+	return PG_IOV_MAX;
+}
+
+/*
+ * AIO read entry point. We are not file-backed, so there is nothing to hand to
+ * an io worker: do the read inline and drive the handle through the normal
+ * states so that the completion callbacks bufmgr registered still run.
+ *
+ * Staging first (rather than reading first) mirrors mdstartreadv and, more
+ * importantly, clears pgaio_my_backend->handed_out_io before we call into
+ * neon_readv, so anything down there is free to acquire a handle of its own. The
+ * PG_TRY is what pays for that ordering: if neon_readv throws we must not leave
+ * the handle STAGED with interrupts still held.
+ *
+ * No smgr-level completion callback is registered, so `result` reaches
+ * bufmgr's callback unchanged and is interpreted as a block count - which is why
+ * we pass nblocks rather than bytes. neon_readv either fills every block or
+ * errors out, so there is no partial-read case to report.
+ */
+static void
+neon_startreadv(PgAioHandle *ioh,
+				SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+				void **buffers, BlockNumber nblocks)
+{
+	pgaio_io_set_target_smgr(ioh, reln, forknum, blocknum, nblocks, false);
+	pgaio_io_stage_external(ioh, PGAIO_OP_READV);
+
+	PG_TRY();
+	{
+		neon_readv(reln, forknum, blocknum, buffers, nblocks);
+	}
+	PG_CATCH();
+	{
+		/* 0 blocks read tells bufmgr's callback this failed; our error wins. */
+		pgaio_io_complete_external(ioh, 0);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	pgaio_io_complete_external(ioh, nblocks);
+}
+
+/*
+ * Only reachable when a staged fd-based AIO op is executed by an io worker,
+ * which cannot happen for us: neon_startreadv above never stages one. Kept
+ * because core dereferences smgr_fd unconditionally. Returning -1 would be worse
+ * than useless - the caller asserts on *off and would then pread(-1) - so fail
+ * loudly instead.
+ */
+static int
+neon_fd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
+{
+	neon_log(ERROR, "neon_fd called: a Neon relation has no local file descriptor");
+	return -1;					/* keep the compiler quiet */
+}
+#endif							/* PG_MAJORVERSION_NUM >= 18 */
+
 static const struct f_smgr neon_smgr =
 {
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_name = "neon",
+	.smgr_init = neon_smgr_init,
+#else
 	.smgr_init = neon_init,
+#endif
 	.smgr_shutdown = NULL,
 	.smgr_open = neon_open,
 	.smgr_close = neon_close,
@@ -2247,13 +2471,52 @@ static const struct f_smgr neon_smgr =
 #if PG_MAJORVERSION_NUM >= 17
 	.smgr_registersync = neon_registersync,
 #endif
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * PG18 additions. The unlogged-build and SLRU entries that used to sit here
+	 * are standalone hooks now; they are installed in libpagestore.c.
+	 */
+	.smgr_maxcombine = neon_maxcombine,
+	.smgr_startreadv = neon_startreadv,
+	.smgr_fd = neon_fd,
+	.smgr_owns = neon_owns,
+#else
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
 	.smgr_end_unlogged_build = neon_end_unlogged_build,
 
 	.smgr_read_slru_segment = neon_read_slru_segment,
+#endif
 };
 
+#if PG_MAJORVERSION_NUM >= 18
+/*
+ * PG18 has a registry rather than a hook, so there is no vtable-returning
+ * entry point: ownership is decided by neon_owns() above. Registration has to
+ * happen in _PG_init (see libpagestore.c) because smgrsw is backend-local and
+ * SMgrRelationData caches an index into it, so every process must build the same
+ * array in the same order.
+ *
+ * There is no smgr_init_hook either - smgrinit() calls every registered smgr's
+ * smgr_init once per backend - so what used to be smgr_init_neon() is now this
+ * vtable entry, and it no longer has to chain to smgr_init_standard(): md's own
+ * smgr_init runs on its own.
+ */
+SmgrId
+smgr_register_neon(void)
+{
+	return smgrregister(&neon_smgr);
+}
+
+static void
+neon_smgr_init(void)
+{
+	RegisterXactCallback(AtEOXact_neon, NULL);
+
+	neon_init();
+	communicator_init();
+}
+#else
 const f_smgr *
 smgr_neon(ProcNumber backend, NRelFileInfo rinfo)
 {
@@ -2274,6 +2537,7 @@ smgr_init_neon(void)
 	neon_init();
 	communicator_init();
 }
+#endif
 
 
 static void

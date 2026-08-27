@@ -1645,9 +1645,31 @@ pg_init_libpagestore(void)
 
 	if (pageserver_connstring[0])
 	{
+#if PG_MAJORVERSION_NUM >= 18
+		neon_log(PageStoreTrace, "register neon smgr");
+
+		/*
+		 * PG18: register in the smgr registry instead of installing a hook.
+		 * This runs from _PG_init, which is where it has to be - smgrsw is
+		 * backend-local and SMgrRelationData caches an index into it, so all
+		 * processes must register the same smgrs in the same order.
+		 *
+		 * The unlogged-build and SLRU entries used to be vtable members,
+		 * dispatched only for relations we owned. They are global hooks now, so
+		 * they fire for md relations too and each one has to check ownership
+		 * itself.
+		 */
+		smgr_register_neon();
+
+		start_unlogged_build_hook = neon_start_unlogged_build;
+		finish_unlogged_build_phase_1_hook = neon_finish_unlogged_build_phase_1;
+		end_unlogged_build_hook = neon_end_unlogged_build;
+		read_slru_segment_hook = neon_read_slru_segment;
+#else
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
+#endif
 		dbsize_hook = neon_dbsize;
 	}
 
