@@ -11,6 +11,28 @@ name: "New: Build & Test"
 # Python regression tests (`test_runner/regress`) on GitHub-hosted runners only, with no
 # external cloud dependency. Real-S3/Azure-backed tests are skipped automatically (they
 # self-skip unless the corresponding env vars are set).
+#
+# Building and testing are two separate jobs, as they are upstream, because they cannot
+# share a disk. Measured on a clean checkout at this commit (debug, `--features testing`,
+# PG v17):
+#
+#   target/                28 GB   (deps 18 GB, incremental 7.5 GB, build 0.9 GB)
+#   build/                 3.6 GB  (four Postgres source trees at -O0 -g3)
+#   pg_install/            1.3 GB
+#   .cargo/                1.6 GB
+#   ------------------------------
+#   build footprint        35 GB
+#
+# The regress suite then writes /tmp/test_output on top of that, and a test whose teardown
+# raises keeps its entire pageserver repo dir (one such test measured 1.1 GB on its own,
+# because `cleanup_local_storage()` is skipped when `env.stop()` throws). Running both
+# halves in one job put all of that on one disk and blew past the runner's 150 GB.
+#
+# So: `build-neon` builds and runs the Rust tests, then packs only what the regress suite
+# actually reads into one artifact; `regress-tests` unpacks that over a fresh checkout and
+# never sees `target/` at all. The artifact is laid out relative to the repo root and is
+# untarred at the workspace root so that every absolute path - including the RPATH that
+# `pg_regress` carries into `pg_install/v17/lib` - is identical to where it was built.
 
 on:
   push:
@@ -67,12 +89,12 @@ jobs:
     uses: ./.github/workflows/build-macos.yml
     secrets: inherit
 
-  build-and-test:
+  build-neon:
     needs: [ build-build-tools-image ]
     runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
-    # Build is ~9 min; the rest is the regress suite, which owns the 180 min step
-    # budget below. Keep some headroom on top of that for a cold cargo/pg cache.
-    timeout-minutes: 210
+    # Build is ~9 min, the Rust test suites are the rest. The regress suite lives in
+    # `regress-tests` now and has its own budget there.
+    timeout-minutes: 90
 
     permissions:
       contents: read
@@ -82,6 +104,16 @@ jobs:
       # Keep cargo's home inside the workspace so the `Cache cargo deps` step below
       # caches the same directory that the build actually uses.
       CARGO_HOME: ${{ github.workspace }}/.cargo
+      # Incremental compilation is dead weight here: nothing in this job reuses the
+      # incremental cache, and it was 7.5 GB of the 28 GB target dir.
+      CARGO_INCREMENTAL: 0
+      # The dev profile defaults to debug=2 (full DWARF), which is what made the test
+      # binaries enormous - `pageserver` alone was a 596 MB test binary and
+      # libpageserver.rlib a 935 MB archive. `line-tables-only` keeps file:line in
+      # panic backtraces, which is all the suites actually read, and takes the whole
+      # target dir from 28 GB to 7.7 GB (measured, same build otherwise). It also
+      # brings the packaged binary set below from 7.9 GB down to 2.7 GB.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
       # The test suite needs features that are off by default. pageserver's `testing`
       # enables test-only APIs and the fail_point! macro, which a large part of the
       # regress suite drives; proxy's `testing` enables the auth backends the test
@@ -236,6 +268,153 @@ jobs:
           export LD_LIBRARY_PATH="$(pwd)/pg_install/${PG_VERSION}/lib"
           cargo nextest run $CARGO_FLAGS -E 'package(pageserver)'
 
+      # Everything the regress suite reads at runtime, and nothing else. Checked against
+      # the fixtures: `NEON_BIN` is only ever used to exec a top-level binary (no test
+      # ever reads target/debug/deps, .fingerprint or incremental, and nothing invokes
+      # cargo or rustc), and the only `build/` paths are the pg_regress and isolation
+      # harnesses that test_pg_regress.py reaches via `pg_distrib_dir / "../build/..."`.
+      #
+      # Two layout constraints, both satisfied by untarring this at the workspace root
+      # in the test job:
+      #   - `build/` must stay a literal sibling of `pg_install/`, because of that
+      #     relative path above.
+      #   - `pg_install/` must stay at the same absolute path, because pg_regress and
+      #     pg_isolation_regress carry an RPATH into pg_install/v17/lib. Both jobs use
+      #     the same container and workdir, so /__w/neon/neon/... matches.
+      #
+      # It is one tar rather than a directory upload because actions/upload-artifact
+      # does not preserve the executable bit, which would make every binary unusable.
+      - name: Package the regress-test artifact
+        # Steps in this container default to `sh -e {0}`, not bash, and this script
+        # needs arrays, process substitution and pipefail.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bins=()
+          while read -r bin; do
+            test -x "target/debug/${bin}" || { echo "FATAL: target/debug/${bin} missing"; exit 1; }
+            bins+=("target/debug/${bin}")
+          done < <(cargo metadata $CARGO_FLAGS --format-version=1 --no-deps |
+                   jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name')
+          echo "packaging ${#bins[@]} binaries"
+
+          # All of pg_install, not just $PG_VERSION: pg_install/v16 is required even on a
+          # v17 run (test_pageserver_getpage_throttle creates a v16 timeline
+          # unconditionally, and the storage controller's own Postgres prefers v16), and
+          # the v14/v15 trees are small next to the binaries.
+          tar -I 'zstd -3 -T0' -cf /tmp/neon-test-artifact.tar.zst \
+            "${bins[@]}" \
+            pg_install \
+            "build/${PG_VERSION}/src/test/regress" \
+            "build/${PG_VERSION}/src/test/isolation"
+
+          ls -lh /tmp/neon-test-artifact.tar.zst
+
+      - name: Upload the regress-test artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: neon-test-artifact-${{ env.PG_VERSION }}
+          path: /tmp/neon-test-artifact.tar.zst
+          # Already zstd-compressed; re-deflating it just burns runner time.
+          compression-level: 0
+          # Purely a hand-off between two jobs of the same run.
+          retention-days: 1
+
+  regress-tests:
+    needs: [ build-build-tools-image, build-neon ]
+    runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
+    # The regress suite owns the 180 min step budget below; keep headroom on top for the
+    # checkout and the artifact download.
+    timeout-minutes: 210
+
+    permissions:
+      contents: read
+      packages: read
+
+    container:
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # Same options as the build job; see the comments there for why each is needed.
+      # They matter more here than there - seccomp=unconfined is what lets the
+      # tokio-epoll-uring tests run at all, and apparmor=unconfined is what stops
+      # Child::kill() returning EACCES and killing the wal_craft tests.
+      options: >-
+        --init --user 1001:1001 --shm-size=512mb
+        --ulimit memlock=67108864:67108864 --ulimit nofile=65536:65536
+        --security-opt seccomp=unconfined
+        --security-opt apparmor=unconfined
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      # The container user has to be both non-root and the owner of the runner-managed
+      # dirs; print what we actually got so a mismatch is obvious from the log.
+      - name: Show container user and runner dir ownership
+        run: |
+          id
+          stat -c '%n uid=%u gid=%g mode=%a' /__w /__w/_temp /github/home
+          # Must resolve, or initdb refuses to start.
+          getent passwd "$(id -u)" || { echo "FATAL: uid $(id -u) not in /etc/passwd"; exit 1; }
+          # pytest scales its worker count off nproc, and each worker runs its own
+          # pageserver + safekeeper + postgres, so record what we're sizing against.
+          echo "nproc=$(nproc)"
+          free -g || true
+          # This job is the one that used to run out of disk; record the starting point.
+          df -h . /tmp || true
+
+          # Diagnose the wal_craft failures seen on the 16x runner but not the 8x one:
+          # PostgresServer::kill() got EACCES(13) from Child::kill(), which is kill(2) --
+          # a syscall POSIX does not allow to return EACCES at all. Something is
+          # mediating signals; AppArmor is the prime suspect, since it returns exactly
+          # EACCES when it denies one. Record the confinement state and probe kill(2)
+          # directly, so the next run says which it is instead of us guessing.
+          echo "--- confinement ---"
+          echo "apparmor profile: $(cat /proc/self/attr/current 2>/dev/null || echo unreadable)"
+          echo "apparmor enabled: $(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || echo unreadable)"
+          grep -E '^(Seccomp|Seccomp_filters|NoNewPrivs)' /proc/self/status || true
+          echo "--- kill(2) probe ---"
+          python3 -c "
+          import os, signal, subprocess, time
+          p = subprocess.Popen(['sleep', '30'])
+          time.sleep(0.3)
+          try:
+              os.kill(p.pid, signal.SIGKILL)
+              print('kill(own child) -> OK')
+          except OSError as e:
+              print('kill(own child) -> errno=%d (%s)' % (e.errno, e.strerror))
+          p.wait()
+          " || echo "probe itself failed"
+
+      # `submodules: true` because test_pg_regress.py passes
+      # vendor/postgres-$PG_VERSION/src/test/{regress,isolation} as --inputdir.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: neon-test-artifact-${{ env.PG_VERSION }}
+          path: /tmp
+
+      - name: Unpack the regress-test artifact
+        # As above: the default shell here is `sh`, which has no `pipefail`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -I zstd -xf /tmp/neon-test-artifact.tar.zst -C "${GITHUB_WORKSPACE}"
+          # Freed immediately: this job's whole point is to keep the disk clear.
+          rm -f /tmp/neon-test-artifact.tar.zst
+          test -x target/debug/pageserver || { echo "FATAL: pageserver not unpacked"; exit 1; }
+          df -h . || true
+
       - name: Install Python deps
         run: ./scripts/pysync
 
@@ -243,16 +422,23 @@ jobs:
         env:
           NEON_BIN: ${{ github.workspace }}/target/debug
           POSTGRES_DISTRIB_DIR: ${{ github.workspace }}/pg_install
-          DEFAULT_PG_VERSION: ${{ env.PG_VERSION }}
+          # DEFAULT_PG_VERSION is exported in the run block below, not here: it has to be
+          # the bare major version and GitHub expressions cannot strip the `v` prefix.
           TEST_OUTPUT: /tmp/test_output
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           # Real S3/Azure-backed tests self-skip when these are unset - no cloud credentials
           # are configured or required here.
-        # The regress suite is the long pole of this job by far: the build finishes in
-        # ~9 minutes, this used to run for 1h51m and only reach 40%. Upstream gives this
-        # step alone 180 minutes for a debug build (75 for release), and runs it with
-        # -n12, so match the shape of that: scale the worker count to the runner instead
-        # of hardcoding 4, and give it a real budget.
+        # The regress suite is the long pole of the whole workflow: it used to run for
+        # 1h51m and only reach 40%. Upstream gives this step alone 180 minutes for a debug
+        # build (75 for release), and runs it with a fixed -n12, so match that.
+        #
+        # -n12 rather than -n$(nproc): every worker runs its own pageserver + safekeeper +
+        # storage controller + postgres, so on the 16-vCPU / 62 GB runner `nproc` oversubscribed
+        # it badly, and the failures that showed up were all timing-sensitive - latency
+        # assertions, "timed out while waiting for", statement timeouts, and shutdowns
+        # missing neon_local's hardcoded 10s stop deadline
+        # (control_plane/src/background_process.rs:39). The suite finishes in ~48 min either
+        # way, well inside the budget below, so the parallelism was not buying time.
         #
         # `--session-timeout` is 10 minutes under `timeout-minutes` so pytest stops
         # itself and still writes a report, rather than being killed mid-run with no
@@ -267,12 +453,138 @@ jobs:
         # for flaky tests is far cheaper than losing the other 86% of the suite.
         # `--dist=loadgroup` has to stay: it keeps @pytest.mark.xdist_group tests on
         # one worker so @pytest.mark.order works.
+        #
+        # `--deselect test_historic_storage_formats`: it fetches its datasets over
+        # anonymous HTTP from the `neon-github-public-dev` S3 bucket, which no longer
+        # allows anonymous reads - every object under `compatibility-data-snapshots/`
+        # returns 403 AccessDenied, and so does a different prefix in the same bucket,
+        # so it is not a per-prefix policy. The datasets were "populated by hand"
+        # (neondatabase/neon#8423), there is no workflow that could regenerate them,
+        # no Wayback capture of any of the three URLs, and no mirror in any public
+        # repo - so this fork cannot run these cases at all. Reported upstream as
+        # neondatabase/neon#12938; drop this once the data is reachable again.
+        #
+        # It fails rather than self-skipping, and misleadingly: the test does not call
+        # raise_for_status(), so the 263-byte AccessDenied XML body is handed to the
+        # zstd decompressor and surfaces as "zstd decompress error: Unknown frame
+        # descriptor". Same reasoning as excluding `test_real_gcs` from nextest above.
+        #
+        # Only these cases are lost. test_create_snapshot passes, and
+        # test_backward_compatibility / test_forward_compatibility /
+        # test_versions_mismatch already self-skip without COMPATIBILITY_NEON_BIN.
         run: |
           mkdir -p "${TEST_OUTPUT}"
+
+          # Bare major version, no `v`: PG_VERSION is `v17`, this must be `17`.
+          # PgVersion._missing_ accepts either, which hides the difference from almost
+          # everything - but fixtures that read the env var as a raw string and build a
+          # path out of it never reach the enum. PSQL.__init__ is one of those:
+          #   search_path = Path(POSTGRES_DISTRIB_DIR) / f"v{DEFAULT_PG_VERSION}" / "bin"
+          # With `v17` that is pg_install/vv17/bin, shutil.which() returns None, and the
+          # test dies on `assert full_path is not None` (neon_fixtures.py:3696) - which is
+          # what was failing test_proxy::test_link_auth and test_proxy_metric_collection.
+          # Upstream strips it the same way, run-python-test-set/action.yml:125.
+          export DEFAULT_PG_VERSION="${PG_VERSION#v}"
+          echo "DEFAULT_PG_VERSION=${DEFAULT_PG_VERSION}"
+
+          # --junitxml so the summary step below has something structured to read.
+          # pytest writes it at session end, including when --session-timeout stops the
+          # run, so a timed-out run still gets summarised.
           ./scripts/pytest test_runner/regress \
-            --dist=loadgroup -n"$(nproc)" \
+            --dist=loadgroup -n12 \
             --session-timeout=10200 \
+            --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
+            --junitxml="${TEST_OUTPUT}/junit.xml" \
             --tb=short --verbose -rA
+
+      # Put the counts and the failing tests on the run's summary page, so a failure can
+      # be read without opening a 130k-line log. Reads the JUnit report rather than
+      # scraping pytest's stdout, and runs even when the suite failed - that is the case
+      # it exists for.
+      - name: Test results summary
+        if: always()
+        shell: bash
+        env:
+          JUNIT_XML: /tmp/test_output/junit.xml
+        run: |
+          python3 <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+
+          path = os.environ.get("JUNIT_XML", "")
+          out = os.environ.get("GITHUB_STEP_SUMMARY") or "/dev/stdout"
+
+          def emit(lines):
+              with open(out, "a", encoding="utf-8") as fh:
+                  fh.write("\n".join(lines) + "\n")
+
+          if not path or not os.path.exists(path):
+              emit(["## Regress tests", "",
+                    "No JUnit report was written - the suite did not get far enough to produce one."])
+              sys.exit(0)
+
+          try:
+              root = ET.parse(path).getroot()
+          except ET.ParseError as e:
+              emit(["## Regress tests", "", f"Could not parse the JUnit report: `{e}`"])
+              sys.exit(0)
+
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+
+          total = failures = errors = skipped = 0
+          seconds = 0.0
+          bad = []      # (kind, test id, message)
+          CAP = 60      # keep the summary readable, and well inside the 1 MB limit
+
+          for s in suites:
+              total += int(s.get("tests", 0))
+              failures += int(s.get("failures", 0))
+              errors += int(s.get("errors", 0))
+              skipped += int(s.get("skipped", 0))
+              seconds += float(s.get("time", 0) or 0)
+              for case in s.iter("testcase"):
+                  for kind, tag in (("failed", "failure"), ("error", "error")):
+                      node = case.find(tag)
+                      if node is None:
+                          continue
+                      name = case.get("name", "?")
+                      cls = (case.get("classname") or "").replace(".", "/")
+                      msg = (node.get("message") or node.text or "").strip().replace("\n", " ")
+                      if len(msg) > 160:
+                          msg = msg[:157] + "..."
+                      bad.append((kind, f"{cls}::{name}", msg))
+
+          passed = total - failures - errors - skipped
+          mins, secs = divmod(int(seconds), 60)
+          verdict = "All green" if not bad else f"{failures} failed, {errors} errored"
+
+          body = ["## Regress tests", "",
+                  f"**{verdict}** &mdash; {passed} passed, {skipped} skipped, "
+                  f"{total} collected, {mins}m{secs:02d}s", ""]
+
+          if bad:
+              body += ["| | Test | Message |", "|---|---|---|"]
+              # Failures first, then teardown errors.
+              shown = sorted(bad, key=lambda b: (b[0] != "failed", b[1]))
+              for kind, tid, msg in shown[:CAP]:
+                  icon = "F" if kind == "failed" else "E"
+                  safe = msg.replace("|", "\\|").replace("`", "'")
+                  body.append(f"| {icon} | `{tid}` | {safe} |")
+              if len(shown) > CAP:
+                  body.append(f"| | _and {len(shown) - CAP} more_ | |")
+              body += ["", "F = test failed, E = error outside the test body (usually teardown).", ""]
+
+          emit(body)
+          PY
+
+      # The suite never deletes a finished test's output dir (paths.py rmtree's a dir on
+      # the way *in*, not on the way out), so this is the accumulated total, and it is
+      # what to look at first if the disk gets tight again.
+      - name: Report test output size
+        if: always()
+        run: |
+          df -h . /tmp || true
+          du -sh /tmp/test_output 2>/dev/null || true
+          du -sh /tmp/test_output/*/ 2>/dev/null | sort -rh | head -20 || true
 
       # upload-artifact walks the tree and then stats each file, so anything that
       # disappears in between fails the whole upload. The test output is a live
