@@ -171,8 +171,28 @@ extern void InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags);
 extern TimeLineID GetWALInsertionTimeLine(void);
 #endif
 
-/* format codes not present in PG17-; but available in PG18+ */
+/*
+ * Hex format codes for 64-bit values. Core does not provide these in any
+ * supported version, so we define them ourselves - but the underlying macro
+ * differs: PG18 dropped INT64_MODIFIER (it was a pg_config.h define) and moved to
+ * the <inttypes.h> macros, so c.h:520 now spells INT64_FORMAT as "%" PRId64.
+ * c.h includes <inttypes.h>, so PRIx64 is available wherever this header is.
+ * The #ifndef guards let core start defining them without breaking us.
+ */
+#ifndef INT64_HEX_FORMAT
+#if PG_MAJORVERSION_NUM >= 18
+#define INT64_HEX_FORMAT "%" PRIx64
+#else
 #define INT64_HEX_FORMAT "%" INT64_MODIFIER "x"
+#endif
+#endif
+
+#ifndef UINT64_HEX_FORMAT
+#if PG_MAJORVERSION_NUM >= 18
+#define UINT64_HEX_FORMAT "%" PRIx64
+#else
 #define UINT64_HEX_FORMAT "%" INT64_MODIFIER "x"
+#endif
+#endif
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */

@@ -12,6 +12,10 @@
 #include "replication/slot.h"
 #include "storage/fd.h"
 #include "storage/procsignal.h"
+#if PG_MAJORVERSION_NUM >= 18
+/* PG18 split the WaitEventSet API (WL_LATCH_SET etc.) out of storage/latch.h */
+#include "storage/waiteventset.h"
+#endif
 #include "tcop/tcopprot.h"
 #include "utils/guc.h"
 #include "utils/wait_event.h"
