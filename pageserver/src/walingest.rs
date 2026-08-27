@@ -1498,7 +1498,7 @@ impl WalIngest {
                         pg_version: PgMajorVersion,
                     ) -> Option<&Lazy<Mutex<RateLimit>>> {
                         const MIN_PG_VERSION: u32 = PgMajorVersion::PG14.major_version_num();
-                        const MAX_PG_VERSION: u32 = PgMajorVersion::PG17.major_version_num();
+                        const MAX_PG_VERSION: u32 = PgMajorVersion::PG18.major_version_num();
                         let pg_version = pg_version.major_version_num();
 
                         if pg_version < MIN_PG_VERSION || pg_version > MAX_PG_VERSION {

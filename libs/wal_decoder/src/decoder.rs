@@ -473,6 +473,73 @@ impl MetadataRecord {
                     anyhow::bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
+            PgMajorVersion::PG18 => {
+                if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                    if info == pg_constants::XLOG_HEAP_INSERT {
+                        let xlrec = v18::XlHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_DELETE {
+                        let xlrec = v18::XlHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_UPDATE
+                        || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+                    {
+                        let xlrec = v18::XlHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v18::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+                    if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                        let xlrec = v18::XlHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v18::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else {
+                    anyhow::bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                }
+            }
         }
 
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -513,7 +580,7 @@ impl MetadataRecord {
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match pg_version {
-            PgMajorVersion::PG16 | PgMajorVersion::PG17 => {
+            PgMajorVersion::PG16 | PgMajorVersion::PG17 | PgMajorVersion::PG18 => {
                 let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 
                 match info {
@@ -735,6 +802,34 @@ impl MetadataRecord {
 
                     return Ok(Some(record));
                 } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_DROP {
+                    let dropdb = XlDropDatabase::decode(buf);
+                    let record = MetadataRecord::Dbase(DbaseRecord::Drop(DbaseDrop {
+                        db_id: dropdb.db_id,
+                        tablespace_ids: dropdb.tablespace_ids,
+                    }));
+
+                    return Ok(Some(record));
+                }
+            }
+            PgMajorVersion::PG18 => {
+                if info == postgres_ffi::v18::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                    tracing::debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                } else if info == postgres_ffi::v18::bindings::XLOG_DBASE_CREATE_FILE_COPY {
+                    // The XLOG record was renamed between v14 and v15,
+                    // but the record format is the same.
+                    // So we can reuse XlCreateDatabase here.
+                    tracing::debug!("XLOG_DBASE_CREATE_FILE_COPY");
+
+                    let createdb = XlCreateDatabase::decode(buf);
+                    let record = MetadataRecord::Dbase(DbaseRecord::Create(DbaseCreate {
+                        db_id: createdb.db_id,
+                        tablespace_id: createdb.tablespace_id,
+                        src_db_id: createdb.src_db_id,
+                        src_tablespace_id: createdb.src_tablespace_id,
+                    }));
+
+                    return Ok(Some(record));
+                } else if info == postgres_ffi::v18::bindings::XLOG_DBASE_DROP {
                     let dropdb = XlDropDatabase::decode(buf);
                     let record = MetadataRecord::Dbase(DbaseRecord::Drop(DbaseDrop {
                         db_id: dropdb.db_id,

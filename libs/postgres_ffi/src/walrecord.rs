@@ -211,6 +211,7 @@ impl DecodedWALRecord {
                 PgMajorVersion::PG15 => info == crate::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 PgMajorVersion::PG16 => info == crate::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 PgMajorVersion::PG17 => info == crate::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                PgMajorVersion::PG18 => info == crate::v18::bindings::XLOG_DBASE_CREATE_FILE_COPY,
             }
         } else {
             false
@@ -886,6 +887,20 @@ pub mod v17 {
             }
         }
     }
+}
+
+pub mod v18 {
+    // PG18 changed xl_heap_inplace (it gained dbId/tsId/relcacheInitFileInval/nmsgs/msgs,
+    // and SizeOfHeapInplace became MinSizeOfHeapInplace), but nothing here decodes
+    // XLOG_HEAP_INPLACE. Every record this module does cover is byte-identical to PG17:
+    // heapam_xlog.h is otherwise unchanged, dbcommands_xlog.h differs only in its
+    // copyright year, and xl_end_of_recovery / xl_parameter_change are untouched.
+    pub use super::v14::XlHeapLockUpdated;
+    pub use super::v16::{
+        XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate, XlParameterChange,
+        rm_neon,
+    };
+    pub use super::v17::XlEndOfRecovery;
 }
 
 #[repr(C)]

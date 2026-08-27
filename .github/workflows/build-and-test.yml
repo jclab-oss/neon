@@ -45,7 +45,7 @@ on:
         required: false
         default: "v17"
         type: choice
-        options: [ v14, v15, v16, v17 ]
+        options: [ v14, v15, v16, v17, v18 ]
 
 concurrency:
   group: build-and-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

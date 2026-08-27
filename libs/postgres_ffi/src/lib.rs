@@ -62,6 +62,7 @@ macro_rules! for_all_postgres_versions {
         $macro!(v15);
         $macro!(v16);
         $macro!(v17);
+        $macro!(v18);
     };
 }
 
@@ -97,6 +98,7 @@ macro_rules! dispatch_pgversion {
                 $crate::PgMajorVersion::PG15 => v15,
                 $crate::PgMajorVersion::PG16 => v16,
                 $crate::PgMajorVersion::PG17 => v17,
+                $crate::PgMajorVersion::PG18 => v18,
             ]
         )
     };
@@ -129,6 +131,7 @@ macro_rules! enum_pgversion_dispatch {
                 V15 : v15,
                 V16 : v16,
                 V17 : v17,
+                V18 : v18,
             ]
         )
     };
@@ -159,6 +162,7 @@ macro_rules! enum_pgversion {
                 V15 : v15,
                 V16 : v16,
                 V17 : v17,
+                V18 : v18,
             ]
         }
     };
@@ -172,6 +176,7 @@ macro_rules! enum_pgversion {
                 V15 : v15,
                 V16 : v16,
                 V17 : v17,
+                V18 : v18,
             ]
         }
     };
