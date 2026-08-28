@@ -396,7 +396,9 @@ jobs:
           echo "nproc=$(nproc)"
           free -g || true
           # This job is the one that used to run out of disk; record the starting point.
-          df -h . /tmp || true
+          # All mounts, not just these two: the v18 runner died on /runner, which `df -h .
+          # /tmp` never showed.
+          df -h || true
 
           # Diagnose the wal_craft failures seen on the 16x runner but not the 8x one:
           # PostgresServer::kill() got EACCES(13) from Child::kill(), which is kill(2) --
@@ -518,12 +520,26 @@ jobs:
           # --junitxml so the summary step below has something structured to read.
           # pytest writes it at session end, including when --session-timeout stops the
           # run, so a timed-out run still gets summarised.
+          # `-o log_cli=false` and no `-rA`: pytest.ini turns live log streaming on, which
+          # copies every fixture log line to stdout on top of the per-test files under
+          # TEST_OUTPUT. That is how the v18 job killed its runner - not `/__w`, which had
+          # 68 GB free, but the runner agent's own disk:
+          #
+          #   Unhandled exception. System.IO.IOException: No space left on device :
+          #     '/runner/_diag/Worker_20260828-052824-utc.log'
+          #
+          # and the job log was lost with it, so there is nothing to diagnose from. Nothing
+          # is actually lost by turning it off: the same logs are still written per test and
+          # uploaded by "Archive test output on failure", and the pass/fail picture now comes
+          # from the JUnit report rather than from `-rA`. `--verbose` stays, so there is still
+          # one line per test to see progress by.
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
             --session-timeout=10200 \
             --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
             --junitxml="${TEST_OUTPUT}/junit.xml" \
-            --tb=short --verbose -rA
+            -o log_cli=false \
+            --tb=short --verbose
 
       # Put the counts and the failing tests on the run's summary page, so a failure can
       # be read without opening a 130k-line log. Reads the JUnit report rather than
