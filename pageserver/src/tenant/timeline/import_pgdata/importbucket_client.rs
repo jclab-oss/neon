@@ -252,7 +252,12 @@ pub struct ControlFile {
 
 impl ControlFile {
     pub(crate) fn new(control_file_buf: Bytes) -> Result<Self, anyhow::Error> {
-        // XXX ControlFileData is version-specific, we're always using v14 here. v17 had changes.
+        // postgres_ffi::ControlFileData is the v14 struct, and this call site cannot do
+        // better - it decodes precisely in order to learn the version. That is fine:
+        // every layout from v14 to v18 is identical up to offset 256, and decode()
+        // validates the CRC against the layout the file itself declares rather than the
+        // one the struct was compiled for. Fields at or after mock_authentication_nonce
+        // are NOT valid here; nothing reads them.
         let control_file_data = ControlFileData::decode(&control_file_buf)?;
         let control_file = ControlFile {
             control_file_data,
