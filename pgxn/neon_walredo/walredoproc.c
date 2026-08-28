@@ -93,6 +93,9 @@
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/bgwriter.h"
 #include "postmaster/postmaster.h"
+#if PG_MAJORVERSION_NUM >= 18
+#include "storage/aio_subsys.h"   /* AioShmemInit, pgaio_init_backend */
+#endif
 #include "replication/logicallauncher.h"
 #include "replication/origin.h"
 #include "replication/slot.h"
@@ -183,6 +186,23 @@ static PgSeccompRule allowed_syscalls[] =
 	PG_SCMP_ALLOW(read),
 	PG_SCMP_ALLOW(select),
 	PG_SCMP_ALLOW(write),
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * PG18 routes buffer reads through the AIO subsystem. Even with
+	 * io_method=sync it lands in pgaio_io_perform_synchronously(), which calls
+	 * pg_preadv()/pg_pwritev() (storage/aio/aio_io.c:128,135) - and those are
+	 * pread()/pwrite() for a single iovec and preadv()/pwritev() otherwise
+	 * (port/pg_iovec.h:54). None of them were reachable before, because PG17's
+	 * md.c read path did not use them.
+	 *
+	 * Without these the process is killed by the filter with no stderr at all,
+	 * and the pageserver only sees "read walredo stdout: early eof".
+	 */
+	PG_SCMP_ALLOW(pread64),
+	PG_SCMP_ALLOW(pwrite64),
+	PG_SCMP_ALLOW(preadv),
+	PG_SCMP_ALLOW(pwritev),
+#endif
 
 	/* Memory allocation */
 	PG_SCMP_ALLOW(brk),
@@ -262,6 +282,20 @@ WalRedoMain(int argc, char *argv[])
 	SetConfigOption("client_min_messages", "ERROR", PGC_SUSET,
 					PGC_S_OVERRIDE);
 
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * PG18's AIO subsystem defaults to io_method=worker
+	 * (DEFAULT_IO_METHOD = IOMETHOD_WORKER, storage/aio.h:42), which expects a
+	 * postmaster to fork io worker processes. We are a single process with no
+	 * postmaster, and the seccomp filter installed below would not let us fork
+	 * them anyway - the process just dies without ever reaching stderr, and the
+	 * pageserver sees "read walredo stdout: early eof".
+	 *
+	 * IOMETHOD_SYNC performs the IO inline, which is what walredo wants.
+	 */
+	SetConfigOption("io_method", "sync", PGC_POSTMASTER, PGC_S_OVERRIDE);
+#endif
+
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of
 	 * DropRelationAllLocalBuffers() is proportional to the number of
@@ -300,6 +334,29 @@ WalRedoMain(int argc, char *argv[])
 	max_wal_senders = 0;
 	InitializeMaxBackends();
 
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * PG18 moved the postmaster child slot array into its own module, and
+	 * anything that sizes itself from MaxLivePostmasterChildren() now errors with
+	 * "PM child array not initialized yet" until InitPostmasterChildSlots() has
+	 * run (postmaster/pmchild.c:73). The postmaster does this at
+	 * postmaster.c:951; we have no postmaster, so do it ourselves.
+	 *
+	 * It goes here, straight after InitializeMaxBackends() - which is what the
+	 * slot count is derived from - and before anything reaches
+	 * CalculateShmemSize(). Both InitializeShmemGUCs() just below (via
+	 * ipci.c:371) and CreateFakeSharedMemoryAndSemaphores() later call it, so
+	 * placing this next to PMSignalShmemInit(), where it looks like it belongs,
+	 * is far too late.
+	 *
+	 * Without it every wal-redo process dies at startup, the pageserver retries
+	 * forever, and its log grows without bound: one pageserver.log reached 8.1 GB
+	 * holding 173937 copies of that FATAL, which is what had been filling CI
+	 * runners' disks.
+	 */
+	InitPostmasterChildSlots();
+#endif
+
 #if PG_VERSION_NUM >= 150000
 	process_shmem_requests();
 	InitializeShmemGUCs();
@@ -328,6 +385,16 @@ WalRedoMain(int argc, char *argv[])
 	 * this before we can use LWLocks.
 	 */
 	InitAuxiliaryProcess();
+
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * Backend-local AIO state. postinit.c:639 does this for a normal backend,
+	 * and it must come after we have a PGPROC: pgaio_init_backend() rejects
+	 * MyProc == NULL with "aio requires a normal PGPROC" (aio_init.c:226).
+	 * So it belongs here rather than next to AioShmemInit().
+	 */
+	pgaio_init_backend();
+#endif
 
 	SetProcessingMode(NormalProcessing);
 
@@ -555,7 +622,20 @@ CreateFakeSharedMemoryAndSemaphores(void)
 	 * Set up lock manager
 	 */
 #if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * v17's InitLocks() built both the shared lock tables and this backend's
+	 * LOCALLOCK hash. PG18 split those: LockManagerShmemInit() does the shared
+	 * side, and InitLockManagerAccess() creates the locallock hash
+	 * (lock.c:504), which postinit.c:659 calls for a normal backend.
+	 *
+	 * Renaming the call without adding the second half left LockMethodLocalHash
+	 * NULL, so the first LockAcquire() - reached from visibilitymap_pin() while
+	 * redoing a neon heap insert - segfaulted inside hash_search(hashp=0x0).
+	 * The walredo process died with no stderr and the pageserver reported only
+	 * "read walredo stdout: early eof".
+	 */
 	LockManagerShmemInit();
+	InitLockManagerAccess();
 #else
 	InitLocks();
 #endif
@@ -621,6 +701,16 @@ CreateFakeSharedMemoryAndSemaphores(void)
 	SyncScanShmemInit();
 	/* Skip due to the 'pg_notify' directory check */
 	/* AsyncShmemInit(); */
+
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * PG18's AIO subsystem needs shared state; CreateOrAttachShmemStructs()
+	 * ends with this (ipci.c:350). Without it pgaio_my_backend is NULL and the
+	 * first buffer read segfaults in pgaio_io_acquire_nb() - which is reached
+	 * even at io_method=sync, because bufmgr routes all reads through AIO now.
+	 */
+	AioShmemInit();
+#endif
 
 #ifdef EXEC_BACKEND
 
