@@ -533,13 +533,36 @@ jobs:
           # uploaded by "Archive test output on failure", and the pass/fail picture now comes
           # from the JUnit report rather than from `-rA`. `--verbose` stays, so there is still
           # one line per test to see progress by.
+          # Output goes to a file, not to the step, and only the tail is echoed back.
+          #
+          # Two v18 runs in a row killed their runner outright:
+          #
+          #   Unhandled exception. System.IO.IOException: No space left on device :
+          #     '/runner/_diag/Worker_...-utc.log'
+          #
+          # That is the runner agent's own disk, which everything a step prints is copied
+          # into, and it died with the job log still on it - so there was nothing left to
+          # say what had produced all the output. `-o log_cli=false` alone did not save it
+          # (v17's job log fell from 127k lines to 4k, v18 still died), so the source is
+          # something other than pytest's live logging, and the only way to find out is to
+          # stop the step output from being what kills the runner.
+          #
+          # The full log lands in TEST_OUTPUT, which "Archive test output on failure" already
+          # uploads, and the size is reported below so runaway output is visible as a number
+          # even when the tail looks unremarkable.
+          rc=0
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
             --session-timeout=10200 \
             --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
             --junitxml="${TEST_OUTPUT}/junit.xml" \
             -o log_cli=false \
-            --tb=short --verbose
+            --tb=short --verbose > "${TEST_OUTPUT}/pytest.log" 2>&1 || rc=$?
+
+          echo "pytest exit=${rc}; captured $(wc -c < "${TEST_OUTPUT}/pytest.log") bytes, $(wc -l < "${TEST_OUTPUT}/pytest.log") lines"
+          echo "--- last 300 lines (full log is in the test-output artifact) ---"
+          tail -n 300 "${TEST_OUTPUT}/pytest.log"
+          exit "${rc}"
 
       # Put the counts and the failing tests on the run's summary page, so a failure can
       # be read without opening a 130k-line log. Reads the JUnit report rather than
