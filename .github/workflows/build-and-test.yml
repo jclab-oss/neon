@@ -550,6 +550,48 @@ jobs:
           # The full log lands in TEST_OUTPUT, which "Archive test output on failure" already
           # uploads, and the size is reported below so runaway output is visible as a number
           # even when the tail looks unremarkable.
+          # Disk watchdog.
+          #
+          # Three v18 runs in a row have killed their runner outright with
+          # "No space left on device: /runner/_diag/..." and taken the job log with
+          # them, so there is still no evidence for what fills the disk - the log is
+          # never uploaded, and the API returns BlobNotFound. Redirecting pytest's
+          # output did not help, which rules out step output as the cause.
+          #
+          # So sample the filesystems into a file and stop pytest while there is still
+          # room, rather than letting the runner die. A clean stop means the archive and
+          # upload steps below actually run, which is the whole point: it turns an
+          # unobservable death into an artifact.
+          WATCHDOG_MIN_KB=10485760          # stop with 10 GiB still free
+          (
+            while true; do
+              avail=$(df -Pk "${TEST_OUTPUT}" 2>/dev/null | awk 'END{print $4}')
+              {
+                echo "--- $(date -u +%H:%M:%S) avail_kb=${avail:-unknown} ---"
+                # `|| true` throughout: the step runs under `sh -e`, and a df for a
+                # path that does not exist would otherwise take the whole subshell down.
+                df -Pk / /tmp /__w 2>/dev/null || true
+                du -sm "${TEST_OUTPUT}" 2>/dev/null || true
+              } >> "${TEST_OUTPUT}/df.log"
+
+              case "${avail}" in
+                ''|*[!0-9]*) ;;             # unreadable, keep going
+                *)
+                  if [ "${avail}" -lt "${WATCHDOG_MIN_KB}" ]; then
+                    {
+                      echo "WATCHDOG: only ${avail} KiB free under ${TEST_OUTPUT}, stopping pytest"
+                      du -sm "${TEST_OUTPUT}"/*/ 2>/dev/null | sort -rn | head -40 || true
+                    } >> "${TEST_OUTPUT}/df.log"
+                    pkill -TERM -f 'bin/pytest' 2>/dev/null || true
+                    break
+                  fi
+                  ;;
+              esac
+              sleep 20
+            done
+          ) &
+          watchdog=$!
+
           rc=0
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
@@ -559,7 +601,11 @@ jobs:
             -o log_cli=false \
             --tb=short --verbose > "${TEST_OUTPUT}/pytest.log" 2>&1 || rc=$?
 
+          kill "${watchdog}" 2>/dev/null || true
+
           echo "pytest exit=${rc}; captured $(wc -c < "${TEST_OUTPUT}/pytest.log") bytes, $(wc -l < "${TEST_OUTPUT}/pytest.log") lines"
+          echo "--- disk over the run (full history in the artifact) ---"
+          tail -n 40 "${TEST_OUTPUT}/df.log" 2>/dev/null || true
           echo "--- last 300 lines (full log is in the test-output artifact) ---"
           tail -n 300 "${TEST_OUTPUT}/pytest.log"
           exit "${rc}"
