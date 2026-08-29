@@ -592,16 +592,30 @@ jobs:
           ) &
           watchdog=$!
 
+          # Heartbeat on stdout: the step's own log survives a SIGKILL, the
+          # redirected pytest.log does not, and until now a hung run showed
+          # nothing at all between "started" and the timeout.
+          (
+            while true; do
+              sleep 120
+              done_count=$(grep -c 'PASSED\|FAILED\|ERROR' "${TEST_OUTPUT}/pytest.log" 2>/dev/null || echo 0)
+              echo "[heartbeat $(date -u +%H:%M:%S)] finished=${done_count} free_kb=$(df -Pk "${TEST_OUTPUT}" 2>/dev/null | awk 'END{print $4}')"
+              tail -n 1 "${TEST_OUTPUT}/pytest.log" 2>/dev/null || true
+            done
+          ) &
+          heartbeat=$!
+
           rc=0
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
             --session-timeout=10200 \
+            --timeout=1800 --timeout-method=thread \
             --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
             --junitxml="${TEST_OUTPUT}/junit.xml" \
             -o log_cli=false \
             --tb=short --verbose > "${TEST_OUTPUT}/pytest.log" 2>&1 || rc=$?
 
-          kill "${watchdog}" 2>/dev/null || true
+          kill "${watchdog}" "${heartbeat}" 2>/dev/null || true
 
           echo "pytest exit=${rc}; captured $(wc -c < "${TEST_OUTPUT}/pytest.log") bytes, $(wc -l < "${TEST_OUTPUT}/pytest.log") lines"
           echo "--- disk over the run (full history in the artifact) ---"
