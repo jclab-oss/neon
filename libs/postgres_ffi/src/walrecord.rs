@@ -1020,7 +1020,12 @@ impl XlXactParsedRecord {
     /// Decode a XLOG_XACT_COMMIT/ABORT/COMMIT_PREPARED/ABORT_PREPARED
     /// record. This should agree with the ParseCommitRecord and ParseAbortRecord
     /// functions in PostgreSQL (in src/backend/access/rmgr/xactdesc.c)
-    pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
+    pub fn decode(
+        buf: &mut Bytes,
+        mut xid: TransactionId,
+        xl_info: u8,
+        pg_version: PgMajorVersion,
+    ) -> XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
         let xact_time = buf.get_i64_le();
@@ -1073,7 +1078,15 @@ impl XlXactParsedRecord {
                 "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
                 nitems
             );
-            let sizeof_xl_xact_stats_item = 12;
+            // PG18 split xl_xact_stats_item's objoid into objid_lo/objid_hi so the
+            // struct grew from 12 bytes to 16. Skipping the old size leaves 4 bytes
+            // per item behind, and the next field read is then the middle of an
+            // item rather than nmsgs.
+            let sizeof_xl_xact_stats_item = if pg_version >= PgMajorVersion::PG18 {
+                16
+            } else {
+                12
+            };
             buf.advance((nitems * sizeof_xl_xact_stats_item).try_into().unwrap());
         }
 
