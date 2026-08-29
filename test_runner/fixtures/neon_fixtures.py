@@ -1015,14 +1015,18 @@ class NeonEnvBuilder:
                 self.cleanup_remote_storage()
             except Exception as e:
                 log.error(f"Error during remote storage cleanup: {e}")
-                if cleanup_error is not None:
+                # Keep the first failure: the later ones are often consequences
+                # of it. The test used to overwrite only when an error was
+                # already recorded, which meant a lone cleanup failure was
+                # logged and then dropped instead of failing the test.
+                if cleanup_error is None:
                     cleanup_error = e
 
             try:
                 self.cleanup_local_storage()
             except Exception as e:
                 log.error(f"Error during local storage cleanup: {e}")
-                if cleanup_error is not None:
+                if cleanup_error is None:
                     cleanup_error = e
 
             if cleanup_error is not None:
