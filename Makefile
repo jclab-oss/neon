@@ -173,6 +173,14 @@ endif
 .PHONY: neon-pg-ext
 neon-pg-ext: $(foreach pg_version,$(NEON_PG_EXT_VERSIONS),neon-pg-ext-$(pg_version))
 
+# Bring up a real deployment with neon_local and exercise it with psql, rather
+# than going through the pytest fixtures. Override PG_VERSION to run a control
+# pass against an older major, e.g. `make smoke PG_VERSION=v17`.
+SMOKE_PG_VERSION ?= v18
+.PHONY: smoke
+smoke: all
+	scripts/pg18_local_smoke.sh $(SMOKE_PG_VERSION)
+
 # This removes everything
 .PHONY: distclean
 distclean:
