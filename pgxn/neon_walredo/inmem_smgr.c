@@ -66,6 +66,24 @@ locate_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno)
 
 /* neon wal-redo storage manager functionality */
 static void inmem_init(void);
+
+#if PG_MAJORVERSION_NUM >= 18
+/*
+ * Reset the in-memory smgr between WAL records.
+ *
+ * walredo used to call smgrinit() for this. In PG17 that was just
+ * (*smgr_init_hook)(), but PG18's smgrinit() also does
+ * on_proc_exit(smgrshutdown) (smgr.c:200), so calling it per record burns an
+ * exit slot each time and the process dies with "out of on_proc_exit slots"
+ * (MAX_ON_EXITS is 20) on the twentieth record. Call the smgr's own init
+ * directly instead - resetting state is all walredo wanted.
+ */
+void
+smgr_reset_inmem(void)
+{
+	inmem_init();
+}
+#endif
 static void inmem_open(SMgrRelation reln);
 static void inmem_close(SMgrRelation reln, ForkNumber forknum);
 static void inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);

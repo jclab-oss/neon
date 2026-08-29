@@ -94,6 +94,20 @@ pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), Error> {
         initdb_command.args(["--locale-provider", locale_provider]);
     }
 
+    // PG18 flipped initdb's data_checksums default from false to true
+    // (initdb.c:167). Neon reconstructs pages from WAL in the pageserver rather
+    // than reading them off a local disk, and nothing in that path maintains the
+    // per-page checksum, so with checksums on every reconstructed page fails
+    // verification at the compute:
+    //
+    //   page verification failed, calculated checksum 13206 but expected 29280
+    //   invalid page in block 14 of relation "base/5/1247"
+    //
+    // Keep the pre-18 behaviour until the storage layer can compute them.
+    if pg_version >= PgMajorVersion::PG18 {
+        initdb_command.arg("--no-data-checksums");
+    }
+
     let initdb_proc = initdb_command.spawn().map_err(Error::Spawn)?;
 
     // Ideally we'd select here with the cancellation token, but the problem is that
