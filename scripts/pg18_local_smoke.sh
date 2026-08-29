@@ -198,6 +198,33 @@ for t in $(seq 1 $TENANTS); do
     q "$port" "CREATE TABLE ${tbl}_big (id int, blob text);
                INSERT INTO ${tbl}_big SELECT 1, repeat('z', 2000000)" >/dev/null
     check "  toasted value" "2000000" "$(q "$port" "SELECT length(blob) FROM ${tbl}_big")"
+
+    # Dropping a relation inside a transaction puts dropped-statistics items in
+    # the commit record. Getting their size wrong made the safekeeper panic
+    # decoding the WAL, which took the whole timeline down - and this script
+    # missed it entirely, because nothing here used to drop anything.
+    q "$port" "CREATE TABLE ${tbl}_drop (id int, t text);
+               INSERT INTO ${tbl}_drop SELECT g, repeat('d', 100) FROM generate_series(1, 500) g" >/dev/null
+    q "$port" "ANALYZE ${tbl}_drop" >/dev/null
+    q "$port" "BEGIN; DROP TABLE ${tbl}_drop; DROP INDEX ${tbl}_n_idx; COMMIT" >/dev/null
+    check "  dropped in a transaction" "0" \
+          "$(q "$port" "SELECT count(*) FROM pg_class WHERE relname IN ('${tbl}_drop','${tbl}_n_idx')")"
+
+    # Several relations dropped at once, so the commit record carries more than
+    # one stats item and a wrong per-item size compounds.
+    q "$port" "CREATE TABLE d1(x int); CREATE TABLE d2(x int); CREATE TABLE d3(x int);
+               INSERT INTO d1 VALUES (1); INSERT INTO d2 VALUES (1); INSERT INTO d3 VALUES (1);
+               ANALYZE d1; ANALYZE d2; ANALYZE d3" >/dev/null
+    q "$port" "BEGIN; DROP TABLE d1, d2, d3; COMMIT" >/dev/null
+    check "  multi-relation drop" "0" \
+          "$(q "$port" "SELECT count(*) FROM pg_class WHERE relname IN ('d1','d2','d3')")"
+
+    # The drops have to survive a round trip through the pageserver, which is
+    # where a mis-decoded commit record actually surfaces.
+    q "$port" "CHECKPOINT" >/dev/null
+    nl endpoint stop "$ep" >/dev/null 2>&1
+    nl endpoint start "$ep" >/dev/null 2>&1
+    check "  drops survive restart" "$sum_before" "$(q "$port" "SELECT coalesce(sum(n),0) FROM $tbl")"
   done
 done
 
