@@ -299,11 +299,19 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 * update the last-written LSN of the page with a conservative
 				 * value in that case, which is the last replayed LSN.
 				 */
-				ereport(RecoveryInProgress() ? LOG : PANIC,
-						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
-								blkno,
-								RelFileInfoFmt(InfoFromSMgrRel(reln)),
-								forknum)));
+				{
+					PageHeader	ph = (PageHeader) page;
+
+					ereport(RecoveryInProgress() ? LOG : PANIC,
+							(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
+									blkno,
+									RelFileInfoFmt(InfoFromSMgrRel(reln)),
+									forknum),
+							 errdetail("lower=%u upper=%u special=%u flags=0x%04X version=%u prune_xid=%u checksum=%u",
+									   ph->pd_lower, ph->pd_upper, ph->pd_special,
+									   ph->pd_flags, PageGetPageLayoutVersion(page),
+									   ph->pd_prune_xid, ph->pd_checksum)));
+				}
 				Assert(false);
 
 				lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
