@@ -606,9 +606,16 @@ jobs:
           heartbeat=$!
 
           rc=0
+          # Outer wall-clock bound. Neither --timeout (per test) nor
+          # --session-timeout (checked between tests) covers an xdist worker
+          # dying: the session then waits forever for work nothing will pick up,
+          # which is how a local run sat for seven hours at 97%. Without this the
+          # only backstop is the step's own timeout-minutes, and that SIGKILLs
+          # the step so the summary and the log tail below never run.
+          timeout --signal=TERM --kill-after=120 9900 \
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
-            --session-timeout=10200 \
+            --session-timeout=9000 \
             --timeout=1800 --timeout-method=thread \
             --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
             --junitxml="${TEST_OUTPUT}/junit.xml" \
@@ -617,6 +624,9 @@ jobs:
 
           kill "${watchdog}" "${heartbeat}" 2>/dev/null || true
 
+          if [ "${rc}" = 124 ]; then
+            echo "pytest hit the outer wall-clock bound (a worker probably died)"
+          fi
           echo "pytest exit=${rc}; captured $(wc -c < "${TEST_OUTPUT}/pytest.log") bytes, $(wc -l < "${TEST_OUTPUT}/pytest.log") lines"
           echo "--- disk over the run (full history in the artifact) ---"
           tail -n 40 "${TEST_OUTPUT}/df.log" 2>/dev/null || true
