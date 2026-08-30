@@ -606,17 +606,22 @@ jobs:
           heartbeat=$!
 
           rc=0
-          # Outer wall-clock bound. Neither --timeout (per test) nor
-          # --session-timeout (checked between tests) covers an xdist worker
-          # dying: the session then waits forever for work nothing will pick up,
-          # which is how a local run sat for seven hours at 97%. Without this the
-          # only backstop is the step's own timeout-minutes, and that SIGKILLs
-          # the step so the summary and the log tail below never run.
+          # Outer wall-clock bound. pytest.ini already sets a 300s per-test
+          # timeout, and --session-timeout is only checked between tests, so
+          # neither covers an xdist worker dying: the session then waits forever
+          # for work nothing will pick up. Without this the only backstop is the
+          # step's own timeout-minutes, and that SIGKILLs the step so the summary
+          # and the log tail below never run.
+          #
+          # Do not add --timeout/--timeout-method here. Overriding them to
+          # 1800s/thread made this worse on both counts: it weakened the
+          # per-test limit six-fold, and the thread method kills the whole
+          # worker rather than raising in the test, which is what produced
+          # "node down: Not properly terminated" and a hang at 99%.
           timeout --signal=TERM --kill-after=120 9900 \
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
             --session-timeout=9000 \
-            --timeout=1800 --timeout-method=thread \
             --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
             --junitxml="${TEST_OUTPUT}/junit.xml" \
             -o log_cli=false \
