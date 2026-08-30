@@ -209,6 +209,36 @@ pub(crate) fn apply_in_neon(
 
             LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
         }
+        NeonWalRecord::MultixactOffsetCreateWithNext {
+            mid,
+            moff,
+            next_moff,
+        } => {
+            let (slru_kind, segno, blknum) = key.to_slru_block().context("invalid record")?;
+            assert_eq!(
+                slru_kind,
+                SlruKind::MultiXactOffsets,
+                "MultixactOffsetCreateWithNext record with unexpected key {key}"
+            );
+            let pageno = mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+            let entryno = mid % pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+
+            let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+            let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+            assert!(
+                segno == expected_segno && blknum == expected_blknum,
+                "MultixactOffsetCreateWithNext record for multi-xid {mid} with unexpected key {key}"
+            );
+            // The caller only builds this record when both entries share a page.
+            assert!(
+                (entryno as usize) + 1 < pg_constants::MULTIXACT_OFFSETS_PER_PAGE as usize,
+                "MultixactOffsetCreateWithNext record for multi-xid {mid} spans two pages"
+            );
+
+            let offset = (entryno * 4) as usize;
+            LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
+            LittleEndian::write_u32(&mut page[offset + 4..offset + 8], *next_moff);
+        }
         NeonWalRecord::MultixactMembersCreate { moff, members } => {
             let (slru_kind, segno, blknum) = key.to_slru_block().context("invalid record")?;
             assert_eq!(
