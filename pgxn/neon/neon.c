@@ -833,6 +833,7 @@ neon_shmem_request_hook(void)
 	RelsizeCacheShmemRequest();
 	WalproposerShmemRequest();
 	LwLsnCacheShmemRequest();
+	UnloggedBuildShmemRequest();
 }
 
 
@@ -858,6 +859,7 @@ neon_shmem_startup_hook(void)
 	RelsizeCacheShmemInit();
 	WalproposerShmemInit();
 	LwLsnCacheShmemInit();
+	UnloggedBuildShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");

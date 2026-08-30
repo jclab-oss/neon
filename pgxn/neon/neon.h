@@ -76,6 +76,10 @@ extern void PagestoreShmemRequest(void);
 extern void RelsizeCacheShmemRequest(void);
 extern void WalproposerShmemRequest(void);
 extern void LwLsnCacheShmemRequest(void);
+
+/* Registry of relations under an unlogged build, readable by every process. */
+extern void UnloggedBuildShmemRequest(void);
+extern void UnloggedBuildShmemInit(void);
 extern void NeonPerfCountersShmemRequest(void);
 
 extern void LfcShmemInit(void);
