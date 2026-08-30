@@ -104,6 +104,131 @@ int debug_compare_local;
 static NRelFileInfo unlogged_build_rel_info;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
+/*
+ * The two variables above are per-process, but the pages an unlogged build
+ * leaves dirty in shared buffers can be written out by any process. The
+ * background writer picking one up does not see the build, and takes it for a
+ * page modified without being WAL-logged:
+ *
+ *   PANIC: [NEON_SMGR] Page 4 of relation 1663/16384/16408.0 is evicted with
+ *          zero LSN
+ *
+ * So the set of relations under an unlogged build has to be visible to
+ * everyone. Each process owns one slot, and n_active keeps the common case -
+ * no build running anywhere - to a single read with no lock.
+ */
+typedef struct
+{
+	pg_atomic_uint32 n_active;
+	int			n_slots;
+	NRelFileInfo slots[FLEXIBLE_ARRAY_MEMBER];
+} UnloggedBuildRegistry;
+
+static UnloggedBuildRegistry *unlogged_builds = NULL;
+
+/* Whether this process occupies a slot, so publish and withdraw stay balanced. */
+static bool unlogged_build_published = false;
+
+static Size
+UnloggedBuildRegistrySize(void)
+{
+	return add_size(offsetof(UnloggedBuildRegistry, slots),
+					mul_size(sizeof(NRelFileInfo),
+							 MaxBackends + NUM_AUXILIARY_PROCS));
+}
+
+void
+UnloggedBuildShmemRequest(void)
+{
+	RequestAddinShmemSpace(UnloggedBuildRegistrySize());
+}
+
+void
+UnloggedBuildShmemInit(void)
+{
+	bool		found;
+
+	unlogged_builds = ShmemInitStruct("neon/UnloggedBuildRegistry",
+									  UnloggedBuildRegistrySize(), &found);
+	if (!found)
+	{
+		pg_atomic_init_u32(&unlogged_builds->n_active, 0);
+		unlogged_builds->n_slots = MaxBackends + NUM_AUXILIARY_PROCS;
+		for (int i = 0; i < unlogged_builds->n_slots; i++)
+			NRelFileInfoInvalidate(unlogged_builds->slots[i]);
+	}
+}
+
+/* Publish, or withdraw, this process's unlogged build. */
+static void
+unlogged_build_publish(bool active, NRelFileInfo rinfo)
+{
+	int			slot;
+
+	if (unlogged_builds == NULL)
+		return;					/* no shmem attached */
+
+	slot = MyProcNumber;
+	if (slot < 0 || slot >= unlogged_builds->n_slots)
+		return;
+
+	if (active)
+	{
+		if (unlogged_build_published)
+			return;				/* the slot is already ours */
+		unlogged_builds->slots[slot] = rinfo;
+		pg_memory_barrier();	/* the slot must be visible before the count */
+		pg_atomic_add_fetch_u32(&unlogged_builds->n_active, 1);
+		unlogged_build_published = true;
+	}
+	else
+	{
+		if (!unlogged_build_published)
+			return;				/* nothing to withdraw */
+		pg_atomic_sub_fetch_u32(&unlogged_builds->n_active, 1);
+		pg_memory_barrier();
+		NRelFileInfoInvalidate(unlogged_builds->slots[slot]);
+		unlogged_build_published = false;
+	}
+}
+
+/*
+ * Drop this process's build, from wherever it is abandoned: the normal end, an
+ * abort, or the check that catches a build left unfinished at commit.
+ */
+static void
+unlogged_build_forget(void)
+{
+	unlogged_build_publish(false, unlogged_build_rel_info);
+	NRelFileInfoInvalidate(unlogged_build_rel_info);
+	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+}
+
+/*
+ * Is this relation being built unlogged, by this process or any other?
+ *
+ * The local check comes first, so the process running the build answers
+ * without touching shared memory; n_active keeps everyone else to one atomic
+ * read while no build is running.
+ */
+static bool
+rel_in_unlogged_build(NRelFileInfo rinfo)
+{
+	if (RelFileInfoEquals(unlogged_build_rel_info, rinfo))
+		return true;
+
+	if (unlogged_builds == NULL ||
+		pg_atomic_read_u32(&unlogged_builds->n_active) == 0)
+		return false;
+
+	for (int i = 0; i < unlogged_builds->n_slots; i++)
+	{
+		if (RelFileInfoEquals(unlogged_builds->slots[i], rinfo))
+			return true;
+	}
+	return false;
+}
+
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
 static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
@@ -939,7 +1064,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 				mdextend(reln, forkNum, blkno, buffer, skipFsync);
 				return;
@@ -1034,7 +1159,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 				mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
 				return;
@@ -1421,7 +1546,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 				mdread(reln, forkNum, blkno, buffer);
 				return;
@@ -1519,7 +1644,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 				mdreadv(reln, forknum, blocknum, buffers, nblocks);
 				return;
@@ -1662,7 +1787,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 #if PG_MAJORVERSION_NUM >= 17
 				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
@@ -1739,7 +1864,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 				return;
@@ -1785,7 +1910,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 				return mdnblocks(reln, forknum);
 			}
@@ -1858,7 +1983,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, Blo
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (rel_in_unlogged_build(InfoFromSMgrRel(reln)))
 			{
 				mdtruncate(reln, forknum, old_blocks, nblocks);
 				return;
@@ -2031,6 +2156,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 		case RELPERSISTENCE_UNLOGGED:
 			unlogged_build_rel_info = InfoFromSMgrRel(reln);
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
+			unlogged_build_publish(true, unlogged_build_rel_info);
 			if (debug_compare_local)
 			{
 				if (!IsParallelWorker())
@@ -2053,6 +2179,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 
 	unlogged_build_rel_info = InfoFromSMgrRel(reln);
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
+	unlogged_build_publish(true, unlogged_build_rel_info);
 
 	/*
 	 * Create the local file. In a parallel build, the leader is expected to
@@ -2102,8 +2229,7 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 	 */
 	if (IsParallelWorker())
 	{
-		NRelFileInfoInvalidate(unlogged_build_rel_info);
-		unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+		unlogged_build_forget();
 	}
 	else
 		unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
@@ -2185,8 +2311,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 		if (debug_compare_local)
 			mdunlink(rinfob, INIT_FORKNUM, true);
 	}
-	NRelFileInfoInvalidate(unlogged_build_rel_info);
-	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+	unlogged_build_forget();
 }
 
 #define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
@@ -2326,8 +2451,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 			 * Forget about any build we might have had in progress. The local
 			 * file will be unlinked by smgrDoPendingDeletes()
 			 */
-			NRelFileInfoInvalidate(unlogged_build_rel_info);
-			unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+			unlogged_build_forget();
 			break;
 
 		case XACT_EVENT_COMMIT:
@@ -2338,8 +2462,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 		case XACT_EVENT_PRE_PREPARE:
 			if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
 			{
-				NRelFileInfoInvalidate(unlogged_build_rel_info);
-				unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+				unlogged_build_forget();
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 (errmsg(NEON_TAG "unlogged index build was not properly finished"))));
