@@ -2543,7 +2543,16 @@ neon_startreadv(PgAioHandle *ioh,
 	}
 	PG_CATCH();
 	{
-		/* 0 blocks read tells bufmgr's callback this failed; our error wins. */
+		/*
+		 * ereport(ERROR) resets InterruptHoldoffCount before entering a
+		 * PG_CATCH block.  Re-establish a hold for the AIO state transitions;
+		 * pgaio_io_complete_external() consumes it when it is done.  Without
+		 * this, a cancellation in neon_readv() trips pgaio_io_update_state()'s
+		 * !INTERRUPTS_CAN_BE_PROCESSED() assertion.
+		 *
+		 * 0 blocks read tells bufmgr's callback this failed; our error wins.
+		 */
+		HOLD_INTERRUPTS();
 		pgaio_io_complete_external(ioh, 0);
 		PG_RE_THROW();
 	}
