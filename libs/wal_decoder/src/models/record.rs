@@ -48,6 +48,18 @@ pub enum NeonWalRecord {
         trunc_offs: usize,
     },
 
+    /// PG18's RecordNewMultiXact stores the start of the *next* multixact's
+    /// members alongside this one's. When both entries land on the same page a
+    /// single record has to carry them: two records for one key at one LSN is
+    /// not a thing the pageserver accepts. When the next entry falls on the
+    /// following page it gets its own [`NeonWalRecord::MultixactOffsetCreate`]
+    /// instead.
+    MultixactOffsetCreateWithNext {
+        mid: MultiXactId,
+        moff: MultiXactOffset,
+        next_moff: MultiXactOffset,
+    },
+
     /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
     #[cfg(feature = "testing")]
     Test {

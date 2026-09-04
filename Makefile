@@ -5,7 +5,12 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install
 
 # Supported PostgreSQL versions
-POSTGRES_VERSIONS = v17 v16 v15 v14
+POSTGRES_VERSIONS = v18 v17 v16 v15 v14
+
+# Versions the Neon extensions (pgxn/) are built for. Kept separate from
+# POSTGRES_VERSIONS so a version can ship a plain server before the extensions
+# build against it.
+NEON_PG_EXT_VERSIONS = v18 v17 v16 v15 v14
 
 # CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
 # and `--features testing` are popular examples.
@@ -166,7 +171,7 @@ endif
 
 # Shorthand to call neon-pg-ext-% target for all Postgres versions
 .PHONY: neon-pg-ext
-neon-pg-ext: $(foreach pg_version,$(POSTGRES_VERSIONS),neon-pg-ext-$(pg_version))
+neon-pg-ext: $(foreach pg_version,$(NEON_PG_EXT_VERSIONS),neon-pg-ext-$(pg_version))
 
 # This removes everything
 .PHONY: distclean

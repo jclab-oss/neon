@@ -246,8 +246,21 @@ extern int  neon_protocol_version;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 
+#if PG_MAJORVERSION_NUM >= 18
+extern SmgrId smgr_register_neon(void);
+
+/*
+ * PG18 turned these from f_smgr members into standalone hooks, so
+ * libpagestore.c installs them directly and they have to be visible here.
+ */
+extern void neon_start_unlogged_build(SMgrRelation reln);
+extern void neon_finish_unlogged_build_phase_1(SMgrRelation reln);
+extern void neon_end_unlogged_build(SMgrRelation reln);
+extern bool neon_read_slru_segment(const char *path, int64 segno);
+#else
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
+#endif
 extern void readahead_buffer_resize(int newsize, void *extra);
 
 

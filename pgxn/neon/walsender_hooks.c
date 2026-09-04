@@ -23,6 +23,14 @@
 #include "neon.h"
 #include "neon_walreader.h"
 #include "walproposer.h"
+#include "storage/latch.h"
+#if PG_MAJORVERSION_NUM >= 18
+/*
+ * PG18 split the WaitEventSet API (the WL_* flags) out of storage/latch.h.
+ * WaitLatchOrSocket/ResetLatch stayed behind, so include both explicitly.
+ */
+#include "storage/waiteventset.h"
+#endif
 
 static NeonWALReader *wal_reader = NULL;
 

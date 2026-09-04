@@ -1015,14 +1015,18 @@ class NeonEnvBuilder:
                 self.cleanup_remote_storage()
             except Exception as e:
                 log.error(f"Error during remote storage cleanup: {e}")
-                if cleanup_error is not None:
+                # Keep the first failure: the later ones are often consequences
+                # of it. The test used to overwrite only when an error was
+                # already recorded, which meant a lone cleanup failure was
+                # logged and then dropped instead of failing the test.
+                if cleanup_error is None:
                     cleanup_error = e
 
             try:
                 self.cleanup_local_storage()
             except Exception as e:
                 log.error(f"Error during local storage cleanup: {e}")
-                if cleanup_error is not None:
+                if cleanup_error is None:
                     cleanup_error = e
 
             if cleanup_error is not None:
@@ -3495,7 +3499,16 @@ class VanillaPostgres(PgProtocol):
         self.pg_bin = pg_bin
         self.running = False
         if init:
-            self.pg_bin.run_capture(["initdb", "--pgdata", str(pgdatadir)])
+            cmd = ["initdb", "--pgdata", str(pgdatadir)]
+            # PG18 turned data checksums on by default. Neon reconstructs pages
+            # in the pageserver and nothing there maintains the per-page
+            # checksum, so a datadir imported from here reads back as
+            # "invalid page in block N of relation ...". Neon's own initdb
+            # already passes this; a vanilla cluster that gets imported needs it
+            # too.
+            if pg_bin.pg_version.isdigit() and int(pg_bin.pg_version) >= 18:
+                cmd.append("--no-data-checksums")
+            self.pg_bin.run_capture(cmd)
         self.configure([f"port = {port}\n"])
 
     def enable_tls(self):

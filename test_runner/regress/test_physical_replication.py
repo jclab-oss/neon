@@ -194,7 +194,8 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
             "max_worker_processes=5",
             "max_wal_senders=1",
             "superuser_reserved_connections=0",
-        ],
+        ]
+        + _small_replica_config(env),
     )
 
     p_con = primary.connect()
@@ -225,6 +226,21 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
     assert secondary.log_contains("too many KnownAssignedXids")
 
 
+def _small_replica_config(env: NeonEnv) -> list[str]:
+    """
+    Config lines that keep a standby's shared structures as small as the tests
+    below assume.
+
+    MaxBackends sizes both the lock table and KnownAssignedXids, and PG18
+    changed how it is computed: it counts autovacuum_worker_slots (new, default
+    16) where earlier versions counted autovacuum_max_workers (default 3). A
+    standby that was small enough to overflow on v17 was no longer small enough
+    on v18, so these tests stopped seeing the error they exist to check.
+    """
+    if env.pg_version.isdigit() and int(env.pg_version) >= 18:
+        return ["autovacuum_worker_slots=1"]
+    return []
+
 def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_simple_env: NeonEnv):
     """
     Test for primary and replica with different configuration settings (max_locks_per_transaction).
@@ -245,7 +261,8 @@ def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_sim
         config_lines=[
             "max_connections=10",
             "max_locks_per_transaction = 10",
-        ],
+        ]
+        + _small_replica_config(env),
     )
 
     n_tables = 1000

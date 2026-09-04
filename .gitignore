@@ -37,3 +37,11 @@ docker-compose/docker-compose-parallel.yml
 # various files for local testing
 /proxy/.subzero
 local_proxy.json
+
+# build-and-test.yml sets CARGO_HOME to $GITHUB_WORKSPACE/.cargo so that the cache
+# step caches the same directory the build uses, which puts cargo's download and
+# checkout caches inside the working tree. .cargo/config.toml is tracked; these are not.
+/.cargo/registry/
+/.cargo/git/
+/.cargo/.package-cache*
+/.cargo/.global-cache

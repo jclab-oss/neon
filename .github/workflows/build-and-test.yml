@@ -41,11 +41,11 @@ on:
   workflow_dispatch:
     inputs:
       pg_version:
-        description: "Postgres major version to build/test"
+        description: "Postgres major version to build/test ('all' = the full matrix)"
         required: false
-        default: "v17"
+        default: all
         type: choice
-        options: [ v14, v15, v16, v17 ]
+        options: [ all, v14, v15, v16, v17, v18 ]
 
 concurrency:
   group: build-and-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -55,7 +55,6 @@ env:
   RUST_BACKTRACE: 1
   COPT: "-Werror"
   BUILD_TYPE: debug
-  PG_VERSION: ${{ inputs.pg_version || 'v17' }}
 
 permissions:
   contents: read
@@ -92,6 +91,17 @@ jobs:
   build-neon:
     needs: [ build-build-tools-image ]
     runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
+    name: build-neon (${{ matrix.pg_version }})
+
+    # One build per Postgres version, in parallel. workflow_dispatch can pin a
+    # single version; an empty input means the whole matrix.
+    #
+    # fail-fast is off so a v18 failure does not cancel v17: v18 support is new
+    # (see NEON_PG_EXT_VERSIONS in the Makefile) and is not a gate yet.
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ${{ fromJSON((!inputs.pg_version || inputs.pg_version == 'all') && '["v17","v18"]' || format('["{0}"]', inputs.pg_version)) }}
     # Build is ~9 min, the Rust test suites are the rest. The regress suite lives in
     # `regress-tests` now and has its own budget there.
     timeout-minutes: 90
@@ -101,6 +111,7 @@ jobs:
       packages: read
 
     env:
+      PG_VERSION: ${{ matrix.pg_version }}
       # Keep cargo's home inside the workspace so the `Cache cargo deps` step below
       # caches the same directory that the build actually uses.
       CARGO_HOME: ${{ github.workspace }}/.cargo
@@ -324,6 +335,20 @@ jobs:
   regress-tests:
     needs: [ build-build-tools-image, build-neon ]
     runs-on: ${{ vars.RUNNER_BUILD_AND_TEST || 'ubuntu-22.04' }}
+    name: regress-tests (${{ matrix.pg_version }})
+
+    # Mirrors build-neon's matrix; each entry picks up its own artifact by name.
+    # `needs` waits for every build-neon entry rather than just the matching one -
+    # that is a GitHub limitation, not intent.
+    #
+    # v18 does not gate the run. It compiles and a server starts with neon.so
+    # preloaded, but it has never run a workload against a pageserver, so treat
+    # its result as a signal and flip continue-on-error off once it is green.
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ${{ fromJSON((!inputs.pg_version || inputs.pg_version == 'all') && '["v17","v18"]' || format('["{0}"]', inputs.pg_version)) }}
+    continue-on-error: ${{ matrix.pg_version == 'v18' }}
     # The regress suite owns the 180 min step budget below; keep headroom on top for the
     # checkout and the artifact download.
     timeout-minutes: 210
@@ -331,6 +356,9 @@ jobs:
     permissions:
       contents: read
       packages: read
+
+    env:
+      PG_VERSION: ${{ matrix.pg_version }}
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm-x64
@@ -368,7 +396,9 @@ jobs:
           echo "nproc=$(nproc)"
           free -g || true
           # This job is the one that used to run out of disk; record the starting point.
-          df -h . /tmp || true
+          # All mounts, not just these two: the v18 runner died on /runner, which `df -h .
+          # /tmp` never showed.
+          df -h || true
 
           # Diagnose the wal_craft failures seen on the 16x runner but not the 8x one:
           # PostgresServer::kill() got EACCES(13) from Child::kill(), which is kill(2) --
@@ -490,12 +520,124 @@ jobs:
           # --junitxml so the summary step below has something structured to read.
           # pytest writes it at session end, including when --session-timeout stops the
           # run, so a timed-out run still gets summarised.
+          # `-o log_cli=false` and no `-rA`: pytest.ini turns live log streaming on, which
+          # copies every fixture log line to stdout on top of the per-test files under
+          # TEST_OUTPUT. That is how the v18 job killed its runner - not `/__w`, which had
+          # 68 GB free, but the runner agent's own disk:
+          #
+          #   Unhandled exception. System.IO.IOException: No space left on device :
+          #     '/runner/_diag/Worker_20260828-052824-utc.log'
+          #
+          # and the job log was lost with it, so there is nothing to diagnose from. Nothing
+          # is actually lost by turning it off: the same logs are still written per test and
+          # uploaded by "Archive test output on failure", and the pass/fail picture now comes
+          # from the JUnit report rather than from `-rA`. `--verbose` stays, so there is still
+          # one line per test to see progress by.
+          # Output goes to a file, not to the step, and only the tail is echoed back.
+          #
+          # Two v18 runs in a row killed their runner outright:
+          #
+          #   Unhandled exception. System.IO.IOException: No space left on device :
+          #     '/runner/_diag/Worker_...-utc.log'
+          #
+          # That is the runner agent's own disk, which everything a step prints is copied
+          # into, and it died with the job log still on it - so there was nothing left to
+          # say what had produced all the output. `-o log_cli=false` alone did not save it
+          # (v17's job log fell from 127k lines to 4k, v18 still died), so the source is
+          # something other than pytest's live logging, and the only way to find out is to
+          # stop the step output from being what kills the runner.
+          #
+          # The full log lands in TEST_OUTPUT, which "Archive test output on failure" already
+          # uploads, and the size is reported below so runaway output is visible as a number
+          # even when the tail looks unremarkable.
+          # Disk watchdog.
+          #
+          # Three v18 runs in a row have killed their runner outright with
+          # "No space left on device: /runner/_diag/..." and taken the job log with
+          # them, so there is still no evidence for what fills the disk - the log is
+          # never uploaded, and the API returns BlobNotFound. Redirecting pytest's
+          # output did not help, which rules out step output as the cause.
+          #
+          # So sample the filesystems into a file and stop pytest while there is still
+          # room, rather than letting the runner die. A clean stop means the archive and
+          # upload steps below actually run, which is the whole point: it turns an
+          # unobservable death into an artifact.
+          WATCHDOG_MIN_KB=10485760          # stop with 10 GiB still free
+          (
+            while true; do
+              avail=$(df -Pk "${TEST_OUTPUT}" 2>/dev/null | awk 'END{print $4}')
+              {
+                echo "--- $(date -u +%H:%M:%S) avail_kb=${avail:-unknown} ---"
+                # `|| true` throughout: the step runs under `sh -e`, and a df for a
+                # path that does not exist would otherwise take the whole subshell down.
+                df -Pk / /tmp /__w 2>/dev/null || true
+                du -sm "${TEST_OUTPUT}" 2>/dev/null || true
+              } >> "${TEST_OUTPUT}/df.log"
+
+              case "${avail}" in
+                ''|*[!0-9]*) ;;             # unreadable, keep going
+                *)
+                  if [ "${avail}" -lt "${WATCHDOG_MIN_KB}" ]; then
+                    {
+                      echo "WATCHDOG: only ${avail} KiB free under ${TEST_OUTPUT}, stopping pytest"
+                      du -sm "${TEST_OUTPUT}"/*/ 2>/dev/null | sort -rn | head -40 || true
+                    } >> "${TEST_OUTPUT}/df.log"
+                    pkill -TERM -f 'bin/pytest' 2>/dev/null || true
+                    break
+                  fi
+                  ;;
+              esac
+              sleep 20
+            done
+          ) &
+          watchdog=$!
+
+          # Heartbeat on stdout: the step's own log survives a SIGKILL, the
+          # redirected pytest.log does not, and until now a hung run showed
+          # nothing at all between "started" and the timeout.
+          (
+            while true; do
+              sleep 120
+              done_count=$(grep -c 'PASSED\|FAILED\|ERROR' "${TEST_OUTPUT}/pytest.log" 2>/dev/null || echo 0)
+              echo "[heartbeat $(date -u +%H:%M:%S)] finished=${done_count} free_kb=$(df -Pk "${TEST_OUTPUT}" 2>/dev/null | awk 'END{print $4}')"
+              tail -n 1 "${TEST_OUTPUT}/pytest.log" 2>/dev/null || true
+            done
+          ) &
+          heartbeat=$!
+
+          rc=0
+          # Outer wall-clock bound. pytest.ini already sets a 300s per-test
+          # timeout, and --session-timeout is only checked between tests, so
+          # neither covers an xdist worker dying: the session then waits forever
+          # for work nothing will pick up. Without this the only backstop is the
+          # step's own timeout-minutes, and that SIGKILLs the step so the summary
+          # and the log tail below never run.
+          #
+          # Do not add --timeout/--timeout-method here. Overriding them to
+          # 1800s/thread made this worse on both counts: it weakened the
+          # per-test limit six-fold, and the thread method kills the whole
+          # worker rather than raising in the test, which is what produced
+          # "node down: Not properly terminated" and a hang at 99%.
+          timeout --signal=TERM --kill-after=120 9900 \
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
-            --session-timeout=10200 \
+            --session-timeout=9000 \
             --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
             --junitxml="${TEST_OUTPUT}/junit.xml" \
-            --tb=short --verbose -rA
+            -o log_cli=false \
+            --tb=short --verbose > "${TEST_OUTPUT}/pytest.log" 2>&1 || rc=$?
+
+          kill "${watchdog}" "${heartbeat}" 2>/dev/null || true
+
+          if [ "${rc}" = 124 ]; then
+            echo "pytest hit the outer wall-clock bound (a worker probably died)"
+          fi
+          echo "pytest exit=${rc}; captured $(wc -c < "${TEST_OUTPUT}/pytest.log") bytes, $(wc -l < "${TEST_OUTPUT}/pytest.log") lines"
+          echo "--- disk over the run (full history in the artifact) ---"
+          tail -n 40 "${TEST_OUTPUT}/df.log" 2>/dev/null || true
+          echo "--- last 300 lines (full log is in the test-output artifact) ---"
+          tail -n 300 "${TEST_OUTPUT}/pytest.log"
+          exit "${rc}"
 
       # Put the counts and the failing tests on the run's summary page, so a failure can
       # be read without opening a 130k-line log. Reads the JUnit report rather than

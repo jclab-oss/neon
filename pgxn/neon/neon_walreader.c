@@ -20,6 +20,10 @@
 #include "access/xlogreader.h"
 #include "libpq/pqformat.h"
 #include "storage/fd.h"
+#if PG_MAJORVERSION_NUM >= 18
+/* PG18 split the WaitEventSet API (WL_SOCKET_* etc.) out of storage/latch.h */
+#include "storage/waiteventset.h"
+#endif
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 

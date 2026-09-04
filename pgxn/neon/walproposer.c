@@ -42,6 +42,10 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "neon_utils.h"
+#if PG_MAJORVERSION_NUM >= 18
+/* PG18 split the WaitEventSet API (WL_* flags) out of storage/latch.h */
+#include "storage/waiteventset.h"
+#endif
 
 /* Prototypes for private functions */
 static void WalProposerLoop(WalProposer *wp);

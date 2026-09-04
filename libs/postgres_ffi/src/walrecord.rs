@@ -211,6 +211,7 @@ impl DecodedWALRecord {
                 PgMajorVersion::PG15 => info == crate::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 PgMajorVersion::PG16 => info == crate::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 PgMajorVersion::PG17 => info == crate::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                PgMajorVersion::PG18 => info == crate::v18::bindings::XLOG_DBASE_CREATE_FILE_COPY,
             }
         } else {
             false
@@ -888,6 +889,20 @@ pub mod v17 {
     }
 }
 
+pub mod v18 {
+    // PG18 changed xl_heap_inplace (it gained dbId/tsId/relcacheInitFileInval/nmsgs/msgs,
+    // and SizeOfHeapInplace became MinSizeOfHeapInplace), but nothing here decodes
+    // XLOG_HEAP_INPLACE. Every record this module does cover is byte-identical to PG17:
+    // heapam_xlog.h is otherwise unchanged, dbcommands_xlog.h differs only in its
+    // copyright year, and xl_end_of_recovery / xl_parameter_change are untouched.
+    pub use super::v14::XlHeapLockUpdated;
+    pub use super::v16::{
+        XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate, XlParameterChange,
+        rm_neon,
+    };
+    pub use super::v17::XlEndOfRecovery;
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct XlSmgrCreate {
@@ -1005,7 +1020,12 @@ impl XlXactParsedRecord {
     /// Decode a XLOG_XACT_COMMIT/ABORT/COMMIT_PREPARED/ABORT_PREPARED
     /// record. This should agree with the ParseCommitRecord and ParseAbortRecord
     /// functions in PostgreSQL (in src/backend/access/rmgr/xactdesc.c)
-    pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
+    pub fn decode(
+        buf: &mut Bytes,
+        mut xid: TransactionId,
+        xl_info: u8,
+        pg_version: PgMajorVersion,
+    ) -> XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
         let xact_time = buf.get_i64_le();
@@ -1058,7 +1078,15 @@ impl XlXactParsedRecord {
                 "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
                 nitems
             );
-            let sizeof_xl_xact_stats_item = 12;
+            // PG18 split xl_xact_stats_item's objoid into objid_lo/objid_hi so the
+            // struct grew from 12 bytes to 16. Skipping the old size leaves 4 bytes
+            // per item behind, and the next field read is then the middle of an
+            // item rather than nmsgs.
+            let sizeof_xl_xact_stats_item = if pg_version >= PgMajorVersion::PG18 {
+                16
+            } else {
+                12
+            };
             buf.advance((nitems * sizeof_xl_xact_stats_item).try_into().unwrap());
         }
 
@@ -1236,4 +1264,82 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
     };
 
     Ok(String::from(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::BytesMut;
+
+    use super::*;
+
+    /// Build an XLOG_XACT_COMMIT payload that drops statistics and then carries
+    /// fields the decoder can only find by skipping the stats items correctly.
+    fn commit_with_dropped_stats(nitems: i32, item_size: usize, origin_lsn: u64) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&0x1122_3344_5566_7788i64.to_le_bytes()); // xact_time
+        let xinfo = crate::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS
+            | pg_constants::XACT_XINFO_HAS_INVALS
+            | pg_constants::XACT_XINFO_HAS_ORIGIN;
+        buf.extend_from_slice(&xinfo.to_le_bytes());
+
+        buf.extend_from_slice(&nitems.to_le_bytes());
+        // Fill the items with a byte that would look like a huge count if the
+        // decoder stopped short and read it as the next field.
+        buf.extend_from_slice(&vec![0xEE; nitems as usize * item_size]);
+
+        buf.extend_from_slice(&1i32.to_le_bytes()); // nmsgs
+        buf.extend_from_slice(&[0xCC; 16]); // one SharedInvalidationMessage
+
+        buf.extend_from_slice(&origin_lsn.to_le_bytes());
+        buf.freeze()
+    }
+
+    /// PG18 grew xl_xact_stats_item from 12 bytes to 16 by splitting objoid into
+    /// objid_lo/objid_hi. Skipping the wrong size leaves the decoder inside an
+    /// item, so everything after the stats is read from the wrong offset.
+    #[test]
+    fn xact_commit_dropped_stats_item_size_is_version_specific() {
+        const ORIGIN: u64 = 0x0000_0000_2222_1111;
+        let xl_info = pg_constants::XLOG_XACT_COMMIT | pg_constants::XLOG_XACT_HAS_INFO;
+
+        for (version, item_size) in [
+            (PgMajorVersion::PG15, 12),
+            (PgMajorVersion::PG16, 12),
+            (PgMajorVersion::PG17, 12),
+            (PgMajorVersion::PG18, 16),
+        ] {
+            for nitems in [1, 2, 5] {
+                let mut buf = commit_with_dropped_stats(nitems, item_size, ORIGIN);
+                let parsed = XlXactParsedRecord::decode(&mut buf, 42, xl_info, version);
+
+                // origin_lsn sits after the stats and the invalidation messages,
+                // so it only comes out right if both were skipped by exactly the
+                // number of bytes the server wrote.
+                assert_eq!(
+                    parsed.origin_lsn,
+                    Lsn(ORIGIN),
+                    "{version:?} with {nitems} dropped stats item(s)"
+                );
+                assert!(!buf.has_remaining(), "{version:?}: bytes left over");
+            }
+        }
+    }
+
+    /// The size actually used has to follow the version, not a constant: decoding
+    /// a PG18 record as if it were PG17 must not silently succeed.
+    #[test]
+    fn pre_pg18_item_size_misreads_a_pg18_record() {
+        let xl_info = pg_constants::XLOG_XACT_COMMIT | pg_constants::XLOG_XACT_HAS_INFO;
+        let mut buf = commit_with_dropped_stats(2, 16, 0x0000_0000_2222_1111);
+
+        // Two items short by 4 bytes each: the decoder lands 8 bytes early and
+        // reads 0xEEEEEEEE as nmsgs, which is what made the safekeeper panic.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            XlXactParsedRecord::decode(&mut buf, 42, xl_info, PgMajorVersion::PG17)
+        }));
+        assert!(
+            result.is_err(),
+            "decoding a PG18 record with the pre-18 item size should not succeed"
+        );
+    }
 }

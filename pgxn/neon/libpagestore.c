@@ -51,6 +51,42 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
+/*
+ * PG18's smgr entry points hold interrupts while calling the storage manager.
+ * That is normally necessary because processing a non-error interrupt can run
+ * smgrreleaseall() reentrantly.  It also means that the ordinary
+ * CHECK_FOR_INTERRUPTS() in our network wait loops cannot cancel a query.
+ *
+ * A pending query cancel is different from a non-error interrupt: while a
+ * command is doing pageserver IO, ProcessInterrupts() is guaranteed to leave
+ * via ERROR (user cancel, statement/lock timeout, or autovacuum cancel).  Let
+ * it do that without dropping the hold around the rest of the smgr call.  The
+ * PG18 AIO entry point catches that ERROR and completes its staged handle
+ * before rethrowing it.
+ *
+ * Keep this local to the actual blocking waits.  In particular, do not make
+ * every CHECK_FOR_INTERRUPTS() in the extension bypass core's smgr hold.
+ */
+static inline void
+pagestore_check_for_interrupts(void)
+{
+#if PG_MAJORVERSION_NUM >= 18
+	if (InterruptHoldoffCount > 0 && CritSectionCount == 0 &&
+		QueryCancelHoldoffCount == 0 && QueryCancelPending)
+	{
+		uint32		saved_interrupt_holdoff_count = InterruptHoldoffCount;
+
+		InterruptHoldoffCount = 0;
+		CHECK_FOR_INTERRUPTS();
+
+		/* Defensive: a cancel during pageserver IO should always throw. */
+		InterruptHoldoffCount = saved_interrupt_holdoff_count;
+	}
+#endif
+
+	CHECK_FOR_INTERRUPTS();
+}
+
 enum NeonComputeMode {
 	CP_MODE_PRIMARY = 0,
 	CP_MODE_REPLICA,
@@ -488,7 +524,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			pg_usleep(shard->delay_us - us_since_last_attempt);
 
 			/* At least we should handle cancellations here */
-			CHECK_FOR_INTERRUPTS();
+			pagestore_check_for_interrupts();
 
 			now = GetCurrentTimestamp();
 			us_since_last_attempt = (int64) (now - shard->last_reconnect_time);
@@ -629,7 +665,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 					{
 						ResetLatch(MyLatch);
 						/* query cancellation, backend shutdown */
-						CHECK_FOR_INTERRUPTS();
+						pagestore_check_for_interrupts();
 					}
 					if (rc & WL_SOCKET_READABLE)
 						break;
@@ -651,7 +687,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 					{
 						ResetLatch(MyLatch);
 						/* query cancellation, backend shutdown */
-						CHECK_FOR_INTERRUPTS();
+						pagestore_check_for_interrupts();
 					}
 					if (rc & WL_SOCKET_WRITEABLE)
 						break;
@@ -748,7 +784,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 									WAIT_EVENT_NEON_PS_CONFIGURING);
 			ResetLatch(MyLatch);
 
-			CHECK_FOR_INTERRUPTS();
+			pagestore_check_for_interrupts();
 
 			/* Data available in socket? */
 			if (event.events & WL_SOCKET_READABLE)
@@ -890,7 +926,7 @@ retry:
 									 WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
 
-		CHECK_FOR_INTERRUPTS();
+		pagestore_check_for_interrupts();
 
 		/* Data available in socket? */
 		if (noccurred > 0 && (occurred_event.events & WL_SOCKET_READABLE) != 0)
@@ -1645,9 +1681,31 @@ pg_init_libpagestore(void)
 
 	if (pageserver_connstring[0])
 	{
+#if PG_MAJORVERSION_NUM >= 18
+		neon_log(PageStoreTrace, "register neon smgr");
+
+		/*
+		 * PG18: register in the smgr registry instead of installing a hook.
+		 * This runs from _PG_init, which is where it has to be - smgrsw is
+		 * backend-local and SMgrRelationData caches an index into it, so all
+		 * processes must register the same smgrs in the same order.
+		 *
+		 * The unlogged-build and SLRU entries used to be vtable members,
+		 * dispatched only for relations we owned. They are global hooks now, so
+		 * they fire for md relations too and each one has to check ownership
+		 * itself.
+		 */
+		smgr_register_neon();
+
+		start_unlogged_build_hook = neon_start_unlogged_build;
+		finish_unlogged_build_phase_1_hook = neon_finish_unlogged_build_phase_1;
+		end_unlogged_build_hook = neon_end_unlogged_build;
+		read_slru_segment_hook = neon_read_slru_segment;
+#else
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
+#endif
 		dbsize_hook = neon_dbsize;
 	}
 

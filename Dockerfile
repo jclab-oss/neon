@@ -49,6 +49,7 @@ COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
 COPY --chown=nonroot vendor/postgres-v15 vendor/postgres-v15
 COPY --chown=nonroot vendor/postgres-v16 vendor/postgres-v16
 COPY --chown=nonroot vendor/postgres-v17 vendor/postgres-v17
+COPY --chown=nonroot vendor/postgres-v18 vendor/postgres-v18
 COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot postgres.mk postgres.mk
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
@@ -168,11 +169,12 @@ COPY --from=build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=build /home/nonroot/pg_install/v15 /usr/local/v15/
 COPY --from=build /home/nonroot/pg_install/v16 /usr/local/v16/
 COPY --from=build /home/nonroot/pg_install/v17 /usr/local/v17/
+COPY --from=build /home/nonroot/pg_install/v18 /usr/local/v18/
 
 # Deprecated: Old deployment scripts use this tarball which contains all the Postgres binaries.
 # That's obsolete, since all the same files are also present under /usr/local/v*. But to keep the
 # old scripts working for now, create the tarball.
-RUN tar -C /usr/local -cvzf /data/postgres_install.tar.gz v14 v15 v16 v17
+RUN tar -C /usr/local -cvzf /data/postgres_install.tar.gz v14 v15 v16 v17 v18
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.

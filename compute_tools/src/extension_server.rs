@@ -133,6 +133,7 @@ fn parse_pg_version(human_version: &str) -> PgMajorVersion {
             "15" => return PG15,
             "16" => return PG16,
             "17" => return PG17,
+            "18" => return PG18,
             _ => {}
         },
         _ => {}
@@ -348,6 +349,14 @@ mod tests {
         assert_eq!(parse_pg_version("PostgreSQL 16beta1"), PG16);
         assert_eq!(parse_pg_version("PostgreSQL 16rc2"), PG16);
         assert_eq!(parse_pg_version("PostgreSQL 16extra"), PG16);
+
+        // Every supported major version must parse. This is a string match with a
+        // catch-all that panics, so a missing arm is a runtime failure at compute
+        // startup rather than a build error - which is exactly how v18 was missed.
+        for v in postgres_versioninfo::PgMajorVersion::ALL {
+            let s = format!("PostgreSQL {}.0", v.major_version_num());
+            assert_eq!(parse_pg_version(&s), *v, "parse_pg_version failed for {s}");
+        }
     }
 
     #[test]
