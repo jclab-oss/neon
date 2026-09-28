@@ -96,9 +96,17 @@ RUN mkdir -p /pgcopydb/{bin,lib} && \
 COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb
 COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5
 
+# Debian 11 (bullseye) LTS ended on 2026-08-31 and its security suite has been removed from
+# deb.debian.org (every bullseye-security package now 404s), so fetch it from archive.debian.org,
+# whose archived Release files are past their Valid-Until date. bullseye and bullseye-updates are
+# still served by deb.debian.org. No-op on bookworm.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused=on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
-    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc && \
+    if grep -q '^VERSION_CODENAME=bullseye$' /etc/os-release; then \
+        sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|' /etc/apt/sources.list && \
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/80-archive-valid-until; \
+    fi
 
 # System deps
 #
