@@ -105,7 +105,10 @@ build: |
   FROM debian@$BULLSEYE_SLIM_SHA as libcgroup-builder
   ENV LIBCGROUP_VERSION=v2.0.3
 
+  # bullseye-security from snapshot.debian.org, see the "build-deps" layer of compute-node.Dockerfile
   RUN set -exu \
+      && sed -i 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20260801T000000Z|' /etc/apt/sources.list \
+      && echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/80-archive-valid-until \
       && apt update \
       && apt install --no-install-recommends -y \
           git \
