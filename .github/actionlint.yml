@@ -34,6 +34,13 @@ config-variables:
   - PREWARM_PROJECT_ID
   - REMOTE_STORAGE_AZURE_CONTAINER
   - REMOTE_STORAGE_AZURE_REGION
+  # This fork's replacements for upstream's self-hosted runner labels (`small`, `small-arm64`, `large`,
+  # `large-arm64`, `large-metal`); each defaults to a GitHub-hosted runner when unset.
+  - RUNNER_LARGE
+  - RUNNER_LARGE_ARM64
+  - RUNNER_LARGE_METAL
+  - RUNNER_SMALL
+  - RUNNER_SMALL_ARM64
   - SLACK_CICD_CHANNEL_ID
   - SLACK_COMPUTE_CHANNEL_ID
   - SLACK_ON_CALL_DEVPROD_STREAM

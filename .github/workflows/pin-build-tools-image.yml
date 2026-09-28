@@ -39,20 +39,32 @@ jobs:
     outputs:
       skip: ${{ steps.check-manifests.outputs.skip }}
 
+    # The fork's GHCR packages may be private (upstream's are public), so log in to inspect them.
+    permissions:
+      packages: read
+
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
         with:
           egress-policy: audit
 
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Check if we really need to pin the image
         id: check-manifests
         env:
+          IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/build-tools
           FROM_TAG: ${{ inputs.from-tag }}
           TO_TAG: pinned
         run: |
-          docker manifest inspect "ghcr.io/neondatabase/build-tools:${FROM_TAG}" > "${FROM_TAG}.json"
-          docker manifest inspect "ghcr.io/neondatabase/build-tools:${TO_TAG}"   > "${TO_TAG}.json"
+          docker manifest inspect "${IMAGE_REPO}:${FROM_TAG}" > "${FROM_TAG}.json"
+          # `pinned` does not exist before the first pin in this fork
+          docker manifest inspect "${IMAGE_REPO}:${TO_TAG}"   > "${TO_TAG}.json" || true
 
           if diff "${FROM_TAG}.json" "${TO_TAG}.json"; then
             skip=true
@@ -69,35 +81,18 @@ jobs:
     if: needs.check-manifests.outputs.skip == 'false' || format('{0}', inputs.force) == 'true'
 
     permissions:
-      id-token: write  # Required for aws/azure login
       packages: write  # required for pushing to GHCR
 
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: |
         {
-          "ghcr.io/neondatabase/build-tools:${{ inputs.from-tag }}-bullseye": [
-            "docker.io/neondatabase/build-tools:pinned-bullseye",
-            "ghcr.io/neondatabase/build-tools:pinned-bullseye",
-            "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bullseye",
-            "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bullseye"
+          "ghcr.io/${{ github.repository_owner }}/build-tools:${{ inputs.from-tag }}-bullseye": [
+            "ghcr.io/${{ github.repository_owner }}/build-tools:pinned-bullseye"
           ],
-          "ghcr.io/neondatabase/build-tools:${{ inputs.from-tag }}-bookworm": [
-            "docker.io/neondatabase/build-tools:pinned-bookworm",
-            "docker.io/neondatabase/build-tools:pinned",
-            "ghcr.io/neondatabase/build-tools:pinned-bookworm",
-            "ghcr.io/neondatabase/build-tools:pinned",
-            "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bookworm",
-            "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned",
-            "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bookworm",
-            "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned"
+          "ghcr.io/${{ github.repository_owner }}/build-tools:${{ inputs.from-tag }}-bookworm": [
+            "ghcr.io/${{ github.repository_owner }}/build-tools:pinned-bookworm",
+            "ghcr.io/${{ github.repository_owner }}/build-tools:pinned"
           ]
         }
-      aws-region: ${{ vars.AWS_ECR_REGION }}
-      aws-account-id: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
-      aws-role-to-assume: "gha-oidc-neon-admin"
-      azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
-      azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
-      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
-      acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
     secrets: inherit

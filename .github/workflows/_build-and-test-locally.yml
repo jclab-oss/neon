@@ -57,7 +57,7 @@ permissions:
 
 jobs:
   build-neon:
-    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ inputs.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE || 'ubuntu-22.04') }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       contents: read
@@ -70,7 +70,15 @@ jobs:
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
       # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
+      # --ulimit nofile, `seccomp=unconfined` and `apparmor=unconfined` are needed on GitHub-hosted runners:
+      # Docker's default seccomp profile blocks io_uring (tokio-epoll-uring fails with EPERM), and on
+      # nested runners the stacked AppArmor label makes kill(2) of our own children fail with EACCES.
+      # GitHub-hosted runners own the workspace, /__w/_temp and /github/home as uid 1001, while the
+      # build-tools image runs as `nonroot` (uid 1000), so run as 1001 (non-root, as initdb requires)
+      # and borrow the host's passwd entry for it.
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --user 1001:1001 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
     env:
       BUILD_TYPE: ${{ inputs.build-type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -85,10 +93,6 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
-
-      - uses: ./.github/actions/prepare-for-subzero
-        with:
-          token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
@@ -115,12 +119,16 @@ jobs:
       #
       # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
       # corresponding Cargo.toml files for their descriptions.
+      #
+      # Upstream also enables `rest_broker`, which needs the real subzero-core crate from the private
+      # neondatabase/subzero repo (see the prepare-for-subzero action); proxy does not compile against
+      # the in-tree libs/proxy/subzero_core stub with it, so it is left out here.
       - name: Set env variables
         env:
           ARCH: ${{ inputs.arch }}
           SANITIZERS: ${{ inputs.sanitizers }}
         run: |
-          CARGO_FLAGS="--locked --features testing,rest_broker"
+          CARGO_FLAGS="--locked --features testing"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_PROFILE=""
@@ -146,49 +154,29 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
       - name: Cache postgres v17 build
         id: cache_pg_17
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
           path: pg_install/v17
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
@@ -250,13 +238,6 @@ jobs:
             done
           fi
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        with:
-          aws-region: eu-central-1
-          role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-          role-duration-seconds: 18000 # 5 hours
-
       - name: Run rust tests
         if: ${{ inputs.sanitizers != 'enabled' }}
         env:
@@ -269,7 +250,9 @@ jobs:
           ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_PROFILE
 
           # run all non-pageserver tests
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_PROFILE -E '!package(pageserver)'
+          # (except test_real_gcs: unlike the real S3/Azure tests it does not skip itself without
+          # credentials, and there is no GCS bucket for this fork to run it against)
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_PROFILE -E '!package(pageserver) & !binary(test_real_gcs)'
 
           # run pageserver tests
           # (When developing new pageserver features gated by config fields, we commonly make the rust
@@ -280,20 +263,8 @@ jobs:
           ${cov_prefix} \
           cargo nextest run $CARGO_FLAGS $CARGO_PROFILE  -E 'package(pageserver)'
 
-          # Run separate tests for real S3
-          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
-          export REMOTE_STORAGE_S3_REGION=eu-central-1
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_PROFILE -E 'package(remote_storage)' -E 'test(test_real_s3)'
-
-          # Run separate tests for real Azure Blob Storage
-          # XXX: replace region with `eu-central-1`-like region
-          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
-          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
-          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
-          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
-          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_PROFILE -E 'package(remote_storage)' -E 'test(test_real_azure)'
+          # Upstream runs the remote_storage tests against real S3 and Azure Blob Storage here, with
+          # Neon's AWS role and Azure account; this fork has neither, so those runs are dropped.
 
       - name: Install postgres binaries
         run: |
@@ -311,7 +282,6 @@ jobs:
         with:
           name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}${{ inputs.sanitizers == 'enabled' && '-sanitized' || '' }}-artifact
           path: /tmp/neon
-          aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Check diesel schema
         if: inputs.build-type == 'release' && inputs.arch == 'x64'
@@ -347,14 +317,19 @@ jobs:
       contents: read
       statuses: write
     needs: [ build-neon ]
-    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large-metal')) }}
+    runs-on: ${{ inputs.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE_METAL || 'ubuntu-22.04') }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       # for changed limits, see comments on `options:` earlier in this file
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
+      # GitHub-hosted runners own the workspace, /__w/_temp and /github/home as uid 1001, while the
+      # build-tools image runs as `nonroot` (uid 1000), so run as 1001 (non-root, as initdb requires)
+      # and borrow the host's passwd entry for it.
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --user 1001:1001 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(format('{{"include":{0}}}', inputs.test-cfg)) }}
@@ -376,21 +351,22 @@ jobs:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
           needs_postgres_source: true
-          run_with_real_s3: true
-          real_s3_bucket: neon-github-ci-tests
-          real_s3_region: eu-central-1
+          # No real S3 (upstream uses Neon's neon-github-ci-tests bucket); tests use a local mock instead.
           rerun_failed: ${{ inputs.rerun-failed }}
           pg_version: ${{ matrix.pg_version }}
           sanitizers: ${{ inputs.sanitizers }}
-          aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
           # `--session-timeout` is equal to (timeout-minutes - 10 minutes) * 60 seconds.
           # Attempt to stop tests gracefully to generate test reports
           # until they are forcibly stopped by the stricter `timeout-minutes` limit.
+          #
+          # test_historic_storage_formats downloads its datasets from Neon's S3 bucket, which no longer
+          # allows anonymous reads (403), so it cannot run here (reported as neondatabase/neon#12938).
           extra_params: --session-timeout=${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
+                        --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats
                         ${{ inputs.test-selection != '' && format('-k "{0}"', inputs.test-selection) || '' }}
         env:
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
-          CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
+          # No CHECK_ONDISK_DATA_COMPATIBILITY: the backward/forward compatibility tests need the previous
+          # release's binaries and snapshot, which upstream keeps in Neon's S3 bucket.
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}

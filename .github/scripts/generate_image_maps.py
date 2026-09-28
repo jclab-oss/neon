@@ -6,11 +6,9 @@ import sys
 source_tag = os.getenv("SOURCE_TAG")
 target_tag = os.getenv("TARGET_TAG")
 branch = os.getenv("BRANCH")
-dev_acr = os.getenv("DEV_ACR")
-prod_acr = os.getenv("PROD_ACR")
-dev_aws = os.getenv("DEV_AWS")
-prod_aws = os.getenv("PROD_AWS")
-aws_region = os.getenv("AWS_REGION")
+# Upstream pushes from ghcr.io/neondatabase to Docker Hub and to Neon's ECR/ACR registries (dev and prod).
+# This fork only has its own GHCR namespace, e.g. ghcr.io/<owner>.
+registry = os.getenv("REGISTRY", "ghcr.io/neondatabase")
 
 components = {
     "neon": ["neon"],
@@ -28,14 +26,7 @@ components = {
 
 registries = {
     "dev": [
-        "docker.io/neondatabase",
-        "ghcr.io/neondatabase",
-        f"{dev_aws}.dkr.ecr.{aws_region}.amazonaws.com",
-        f"{dev_acr}.azurecr.io/neondatabase",
-    ],
-    "prod": [
-        f"{prod_aws}.dkr.ecr.{aws_region}.amazonaws.com",
-        f"{prod_acr}.azurecr.io/neondatabase",
+        registry,
     ],
 }
 
@@ -50,15 +41,15 @@ target_tags = (
     if branch in release_branches
     else [target_tag]
 )
-target_stages = ["dev", "prod"] if branch in release_branches else ["dev"]
+target_stages = ["dev"]
 
 for component_name, component_images in components.items():
     for stage in target_stages:
         outputs[f"{component_name}-{stage}"] = {
-            f"ghcr.io/neondatabase/{component_image}:{source_tag}": [
-                f"{registry}/{component_image}:{tag}"
-                for registry, tag in itertools.product(registries[stage], target_tags)
-                if not (registry == "ghcr.io/neondatabase" and tag == source_tag)
+            f"{registry}/{component_image}:{source_tag}": [
+                f"{target_registry}/{component_image}:{tag}"
+                for target_registry, tag in itertools.product(registries[stage], target_tags)
+                if not (target_registry == registry and tag == source_tag)
             ]
             for component_image in component_images
         }
