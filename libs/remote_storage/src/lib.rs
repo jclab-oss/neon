@@ -12,6 +12,12 @@
 mod azure_blob;
 mod config;
 mod error;
+// The GCS provider landed upstream (neondatabase/neon#11666, #12855, #12873) with ~40 rustc/clippy
+// warnings and without rustfmt formatting, which fails both the `-D warnings` clippy gate and
+// `cargo fmt --check` in CI. Exempt this module only, so both gates keep covering everything
+// else, and the file itself stays byte-identical to upstream; drop this once upstream cleans it up.
+#[allow(unused, clippy::all)]
+#[rustfmt::skip]
 mod gcs_bucket;
 mod local_fs;
 mod metrics;
