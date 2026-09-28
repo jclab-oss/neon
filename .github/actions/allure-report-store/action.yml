@@ -9,8 +9,9 @@ inputs:
     description: 'string to distinguish different results in the same run'
     required: true
   aws-oidc-role-arn:
-    description: 'OIDC role arn to interract with S3'
-    required: true
+    description: 'Unused: this fork has no access to AWS/S3. Kept so that callers passing it stay valid'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -35,29 +36,20 @@ runs:
         echo "BRANCH_OR_PR=${BRANCH_OR_PR}" >> $GITHUB_ENV
         echo "REPORT_DIR=${REPORT_DIR}"     >> $GITHUB_ENV
 
-    - uses: aws-actions/configure-aws-credentials@v4
-      if: ${{ !cancelled() }}
-      with:
-        aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws-oidc-role-arn }}
-        role-duration-seconds: 3600 # 1 hour should be more than enough to upload report
-
-    - name: Upload test results
+    # This fork has no access to Neon's S3 bucket, so the raw results are stored as a GitHub Actions
+    # artifact of the current run (`allure-results-*`), which `allure-report-generate` collects.
+    - name: Prepare test results
+      id: prepare
       shell: bash -euxo pipefail {0}
       run: |
-        REPORT_PREFIX=reports/${BRANCH_OR_PR}
-        RAW_PREFIX=reports-raw/${BRANCH_OR_PR}/${GITHUB_RUN_ID}
-
         # Add metadata
         cat <<EOF > ${REPORT_DIR}/executor.json
           {
             "name": "GitHub Actions",
             "type": "github",
-            "url": "https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/latest/index.html",
             "buildOrder": ${GITHUB_RUN_ID},
             "buildName": "GitHub Actions Run #${GITHUB_RUN_NUMBER}/${GITHUB_RUN_ATTEMPT}",
             "buildUrl": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}",
-            "reportUrl": "https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html",
             "reportName": "Allure Report"
           }
         EOF
@@ -66,18 +58,29 @@ runs:
           COMMIT_SHA=${COMMIT_SHA}
         EOF
 
-        ARCHIVE="${UNIQUE_KEY}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
+        # The unique key alone is not unique across matrix jobs (e.g. with and without LFC),
+        # so keep the timestamp suffix upstream uses for its S3 object names.
+        ARCHIVE_NAME="${UNIQUE_KEY}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)"
+        ARCHIVE="/tmp/allure-results-${ARCHIVE_NAME}.tar.zst"
         ZSTD_NBTHREADS=0
 
         time tar -C ${REPORT_DIR} -cf ${ARCHIVE} --zstd .
-        time aws s3 mv --only-show-errors ${ARCHIVE} "s3://${BUCKET}/${RAW_PREFIX}/${ARCHIVE}"
+        echo "archive=${ARCHIVE}"           >> $GITHUB_OUTPUT
+        echo "archive-name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
       env:
         UNIQUE_KEY: ${{ inputs.unique-key }}
         COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        BUCKET: neon-github-public-dev
+
+    - name: Upload test results
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: allure-results-${{ steps.prepare.outputs.archive-name }}
+        path: ${{ steps.prepare.outputs.archive }}
+        compression-level: 0
 
     - name: Cleanup
       if: always()
       shell: bash -euxo pipefail {0}
       run: |
         rm -rf ${REPORT_DIR}
+        rm -f /tmp/allure-results-*.tar.zst
