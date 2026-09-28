@@ -59,7 +59,6 @@ jobs:
   build-neon:
     runs-on: ${{ inputs.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE || 'ubuntu-22.04') }}
     permissions:
-      id-token: write # aws-actions/configure-aws-credentials
       contents: read
     container:
       image: ${{ inputs.build-tools-image }}
@@ -313,7 +312,6 @@ jobs:
     # Don't run regression tests on debug arm64 builds
     if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
     permissions:
-      id-token: write # aws-actions/configure-aws-credentials
       contents: read
       statuses: write
     needs: [ build-neon ]

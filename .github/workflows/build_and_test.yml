@@ -63,6 +63,11 @@ jobs:
 
   build-build-tools-image:
     needs: [ check-permissions ]
+    # Reusable workflows can't get more permissions than their caller grants, and this repo's default
+    # GITHUB_TOKEN is read-only (upstream's is read-write), so grant what the called jobs request.
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
@@ -215,6 +220,11 @@ jobs:
     needs: [ meta, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
     if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    # Reusable workflows can't get more permissions than their caller grants, and this repo's default
+    # GITHUB_TOKEN is read-only (upstream's is read-write), so grant what the called jobs request.
+    permissions:
+      contents: read
+      statuses: write
     strategy:
       fail-fast: false
       matrix:
@@ -1075,6 +1085,10 @@ jobs:
     needs: [ build-build-tools-image, test-images, build-and-test-locally ]
     # `!failure() && !cancelled()` is required because the job (transitively) depends on jobs that can be skipped
     if: github.ref_name == 'main' && !failure() && !cancelled()
+    # Reusable workflows can't get more permissions than their caller grants, and this repo's default
+    # GITHUB_TOKEN is read-only (upstream's is read-write), so grant what the called jobs request.
+    permissions:
+      packages: write
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
       from-tag: ${{ needs.build-build-tools-image.outputs.image-tag }}
