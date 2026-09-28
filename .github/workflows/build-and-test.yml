@@ -419,6 +419,9 @@ jobs:
         run: ./scripts/pysync
 
       - name: Run Python regression tests
+        id: pytest
+        # bash, not the container's default `sh`: the run block uses $SECONDS.
+        shell: bash
         env:
           NEON_BIN: ${{ github.workspace }}/target/debug
           POSTGRES_DISTRIB_DIR: ${{ github.workspace }}/pg_install
@@ -428,6 +431,18 @@ jobs:
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           # Real S3/Azure-backed tests self-skip when these are unset - no cloud credentials
           # are configured or required here.
+          #
+          # Run without the Local File Cache, which is the configuration upstream gates on
+          # for debug builds. Upstream's build_and_test.yml runs debug on exactly one cell,
+          # `{"pg_version":"v17", "lfc_state": "without-lfc"}`, and the with-lfc debug cell
+          # is `continue-on-error` (_build-and-test-locally.yml:372). LFC coverage upstream
+          # comes from the release builds, which this fork does not run.
+          #
+          # Left unset, fixtures/utils.py turns LFC on, so this job was holding itself to a
+          # stricter bar than upstream does - e.g. test_lfc_prewarm_cancel, which is
+          # skipif(not USE_LFC), failed here with "skip prewarm because another prewarm
+          # is still active", a test upstream never requires to pass in debug.
+          USE_LFC: "false"
         # The regress suite is the long pole of the whole workflow: it used to run for
         # 1h51m and only reach 40%. Upstream gives this step alone 180 minutes for a debug
         # build (75 for release), and runs it with a fixed -n12, so match that.
@@ -445,14 +460,24 @@ jobs:
         # indication of which tests were slow.
         timeout-minutes: 180
         #
-        # No `--reruns`: pytest-rerunfailures reacts to an xdist worker crash by
-        # calling sched.mark_test_pending(), which --dist=loadgroup's scheduler does
-        # not implement. One worker dying therefore raises NotImplementedError inside
-        # pytest itself (INTERNALERROR, exit 3) and takes the whole session down - it
-        # aborted a run at 14% after a single worker went "node down". Losing retries
-        # for flaky tests is far cheaper than losing the other 86% of the suite.
-        # `--dist=loadgroup` has to stay: it keeps @pytest.mark.xdist_group tests on
-        # one worker so @pytest.mark.order works.
+        # Failed tests get one more try, in a second pytest session. This is the
+        # counterpart of upstream's `--reruns 2` (rerun-failed defaults to true in
+        # _build-and-test-locally.yml), which this job cannot use in-session:
+        # pytest-rerunfailures reacts to an xdist worker crash by calling
+        # sched.mark_test_pending(), which --dist=loadgroup's scheduler does not
+        # implement, so one worker dying raises NotImplementedError inside pytest itself
+        # (INTERNALERROR, exit 3) and takes the whole session down - it aborted a run at
+        # 14% after a single worker went "node down". A separate `--last-failed` session
+        # has no such interaction. `--dist=loadgroup` has to stay: it keeps
+        # @pytest.mark.xdist_group tests on one worker so @pytest.mark.order works.
+        #
+        # What is left failing after the full suite is timing-sensitive under 12-way load
+        # (last run on main: a 500ms statement_timeout in test_cancellations, the 300s
+        # per-test limit in test_timetravel, the 10s pageserver stop deadline in
+        # test_pageserver_reconnect's teardown). The second pass runs only those, with
+        # far less contention. A test that fails both passes still fails the job, and one
+        # that only passed on the second try is listed as flaky on the run summary, so a
+        # retry never goes unnoticed.
         #
         # `--deselect test_historic_storage_formats`: it fetches its datasets over
         # anonymous HTTP from the `neon-github-public-dev` S3 bucket, which no longer
@@ -487,35 +512,122 @@ jobs:
           export DEFAULT_PG_VERSION="${PG_VERSION#v}"
           echo "DEFAULT_PG_VERSION=${DEFAULT_PG_VERSION}"
 
+          # Both sessions share one budget: 10200s is the 180 min step minus 10 min, so
+          # pytest stops itself and writes its report before the step is killed.
+          budget=10200
+
           # --junitxml so the summary step below has something structured to read.
           # pytest writes it at session end, including when --session-timeout stops the
           # run, so a timed-out run still gets summarised.
+          rc=0
           ./scripts/pytest test_runner/regress \
             --dist=loadgroup -n12 \
-            --session-timeout=10200 \
+            --session-timeout="${budget}" \
             --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats \
             --junitxml="${TEST_OUTPUT}/junit.xml" \
-            --tb=short --verbose -rA
+            --tb=short --verbose -rA || rc=$?
+
+          # Only exit code 1 means "ran to the end, some tests failed". 2 is an
+          # interrupted session (including --session-timeout), 3 an internal error: a
+          # retry of whatever happened to fail first would not mean anything there.
+          remaining=$(( budget - SECONDS ))
+          if [ "${rc}" -eq 1 ] && [ "${remaining}" -gt 600 ]; then
+            echo "::group::Second pass: re-running the failed tests (${remaining}s left)"
+            # Tells the archive steps below to keep the first pass's output even if the
+            # second pass turns the step green: that is the evidence of the flake.
+            echo "rerun=true" >> "${GITHUB_OUTPUT}"
+            rc=0
+            # --last-failed reads the node ids pytest's cache recorded in the first pass,
+            # including tests whose call passed but whose teardown errored.
+            #
+            # Own TEST_OUTPUT: fixtures/paths.py rmtree's a test's output dir when the
+            # test starts, so re-running into the same tree would delete the logs of the
+            # first failure - which are the ones worth reading.
+            # The report stays at the top, where the summary step looks for it.
+            junit_rerun="${TEST_OUTPUT}/junit-rerun.xml"
+            rerun_output="${TEST_OUTPUT}/rerun"
+            mkdir -p "${rerun_output}"
+            TEST_OUTPUT="${rerun_output}" ./scripts/pytest test_runner/regress \
+              --last-failed --last-failed-no-failures none \
+              --dist=loadgroup -n4 \
+              --session-timeout="$(( remaining - 60 ))" \
+              --junitxml="${junit_rerun}" \
+              --tb=short --verbose -rA || rc=$?
+            echo "::endgroup::"
+            # 5 = nothing collected, i.e. the cache had no failures to re-run. Keep the
+            # first pass's verdict rather than let that read as a pass.
+            if [ "${rc}" -eq 5 ]; then
+              rc=1
+            fi
+          elif [ "${rc}" -eq 1 ]; then
+            echo "Not re-running failed tests: only ${remaining}s of the step budget left"
+          fi
+          exit "${rc}"
 
       # Put the counts and the failing tests on the run's summary page, so a failure can
       # be read without opening a 130k-line log. Reads the JUnit report rather than
       # scraping pytest's stdout, and runs even when the suite failed - that is the case
       # it exists for.
+      #
+      # When the second pass ran, a test counts as failed only if it failed there too.
+      # Tests that failed first and then passed are listed separately as flaky.
       - name: Test results summary
         if: always()
         shell: bash
         env:
           JUNIT_XML: /tmp/test_output/junit.xml
+          JUNIT_RERUN_XML: /tmp/test_output/junit-rerun.xml
         run: |
           python3 <<'PY'
           import os, sys, xml.etree.ElementTree as ET
 
           path = os.environ.get("JUNIT_XML", "")
+          rerun_path = os.environ.get("JUNIT_RERUN_XML", "")
           out = os.environ.get("GITHUB_STEP_SUMMARY") or "/dev/stdout"
+          CAP = 60      # keep the summary readable, and well inside the 1 MB limit
 
           def emit(lines):
               with open(out, "a", encoding="utf-8") as fh:
                   fh.write("\n".join(lines) + "\n")
+
+          def load(p):
+              """(totals, {test id: (kind, message)}) for one JUnit report."""
+              root = ET.parse(p).getroot()
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              t = {"total": 0, "failures": 0, "errors": 0, "skipped": 0, "seconds": 0.0}
+              bad = {}
+              for s in suites:
+                  t["total"] += int(s.get("tests", 0))
+                  t["failures"] += int(s.get("failures", 0))
+                  t["errors"] += int(s.get("errors", 0))
+                  t["skipped"] += int(s.get("skipped", 0))
+                  t["seconds"] += float(s.get("time", 0) or 0)
+                  for case in s.iter("testcase"):
+                      for kind, tag in (("failed", "failure"), ("error", "error")):
+                          node = case.find(tag)
+                          if node is None:
+                              continue
+                          name = case.get("name", "?")
+                          cls = (case.get("classname") or "").replace(".", "/")
+                          msg = (node.get("message") or node.text or "").strip().replace("\n", " ")
+                          if len(msg) > 160:
+                              msg = msg[:157] + "..."
+                          # A test can report both a failure and a teardown error;
+                          # keep the first, which is the failure.
+                          bad.setdefault(f"{cls}::{name}", (kind, msg))
+              return t, bad
+
+          def table(rows):
+              lines = ["| | Test | Message |", "|---|---|---|"]
+              # Failures first, then teardown errors.
+              shown = sorted(rows, key=lambda r: (r[1][0] != "failed", r[0]))
+              for tid, (kind, msg) in shown[:CAP]:
+                  icon = "F" if kind == "failed" else "E"
+                  safe = msg.replace("|", "\\|").replace("`", "'")
+                  lines.append(f"| {icon} | `{tid}` | {safe} |")
+              if len(shown) > CAP:
+                  lines.append(f"| | _and {len(shown) - CAP} more_ | |")
+              return lines
 
           if not path or not os.path.exists(path):
               emit(["## Regress tests", "",
@@ -523,55 +635,41 @@ jobs:
               sys.exit(0)
 
           try:
-              root = ET.parse(path).getroot()
+              t, first_bad = load(path)
           except ET.ParseError as e:
               emit(["## Regress tests", "", f"Could not parse the JUnit report: `{e}`"])
               sys.exit(0)
 
-          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          final_bad, flaky, rerun_note = first_bad, {}, ""
+          if rerun_path and os.path.exists(rerun_path):
+              try:
+                  rt, rerun_bad = load(rerun_path)
+                  final_bad = rerun_bad
+                  flaky = {k: v for k, v in first_bad.items() if k not in rerun_bad}
+                  t["seconds"] += rt["seconds"]
+                  rerun_note = (f" Second pass re-ran {rt['total']}: "
+                                f"{len(flaky)} passed, {len(rerun_bad)} failed again.")
+              except ET.ParseError as e:
+                  rerun_note = f" Could not parse the second-pass report: `{e}`."
 
-          total = failures = errors = skipped = 0
-          seconds = 0.0
-          bad = []      # (kind, test id, message)
-          CAP = 60      # keep the summary readable, and well inside the 1 MB limit
-
-          for s in suites:
-              total += int(s.get("tests", 0))
-              failures += int(s.get("failures", 0))
-              errors += int(s.get("errors", 0))
-              skipped += int(s.get("skipped", 0))
-              seconds += float(s.get("time", 0) or 0)
-              for case in s.iter("testcase"):
-                  for kind, tag in (("failed", "failure"), ("error", "error")):
-                      node = case.find(tag)
-                      if node is None:
-                          continue
-                      name = case.get("name", "?")
-                      cls = (case.get("classname") or "").replace(".", "/")
-                      msg = (node.get("message") or node.text or "").strip().replace("\n", " ")
-                      if len(msg) > 160:
-                          msg = msg[:157] + "..."
-                      bad.append((kind, f"{cls}::{name}", msg))
-
-          passed = total - failures - errors - skipped
-          mins, secs = divmod(int(seconds), 60)
-          verdict = "All green" if not bad else f"{failures} failed, {errors} errored"
+          passed = t["total"] - len(final_bad) - t["skipped"]
+          mins, secs = divmod(int(t["seconds"]), 60)
+          n_failed = sum(1 for k, _ in final_bad.values() if k == "failed")
+          n_errored = len(final_bad) - n_failed
+          verdict = "All green" if not final_bad else f"{n_failed} failed, {n_errored} errored"
 
           body = ["## Regress tests", "",
-                  f"**{verdict}** &mdash; {passed} passed, {skipped} skipped, "
-                  f"{total} collected, {mins}m{secs:02d}s", ""]
+                  f"**{verdict}** &mdash; {passed} passed, {t['skipped']} skipped, "
+                  f"{t['total']} collected, {mins}m{secs:02d}s.{rerun_note}", ""]
 
-          if bad:
-              body += ["| | Test | Message |", "|---|---|---|"]
-              # Failures first, then teardown errors.
-              shown = sorted(bad, key=lambda b: (b[0] != "failed", b[1]))
-              for kind, tid, msg in shown[:CAP]:
-                  icon = "F" if kind == "failed" else "E"
-                  safe = msg.replace("|", "\\|").replace("`", "'")
-                  body.append(f"| {icon} | `{tid}` | {safe} |")
-              if len(shown) > CAP:
-                  body.append(f"| | _and {len(shown) - CAP} more_ | |")
+          if final_bad:
+              body += table(final_bad.items())
               body += ["", "F = test failed, E = error outside the test body (usually teardown).", ""]
+
+          if flaky:
+              body += ["### Flaky: failed the first pass, passed on re-run", ""]
+              body += table(flaky.items())
+              body += [""]
 
           emit(body)
           PY
@@ -594,7 +692,8 @@ jobs:
       # Collapse it into one archive first so the upload sees a single stable file.
       # tar can still trip over files vanishing mid-read, so ignore those too.
       - name: Archive test output on failure
-        if: failure()
+        # Also after a green re-run: the first pass's logs are what explain a flaky test.
+        if: failure() || steps.pytest.outputs.rerun == 'true'
         run: |
           tar czf /tmp/test-output.tgz --ignore-failed-read \
             --warning=no-file-changed --warning=no-file-removed \
@@ -602,9 +701,11 @@ jobs:
           ls -l /tmp/test-output.tgz || echo "no archive produced"
 
       - name: Upload test output on failure
-        if: failure()
+        if: failure() || steps.pytest.outputs.rerun == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-output-${{ env.PG_VERSION }}
           path: /tmp/test-output.tgz
-          retention-days: 7
+          # 14, not 7: the tracebacks behind a red run live only in here, and a week was
+          # not long enough to get back to them.
+          retention-days: 14
