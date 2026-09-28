@@ -135,7 +135,21 @@ UnloggedBuildRegistrySize(void)
 void
 UnloggedBuildShmemRequest(void)
 {
+#if PG_MAJORVERSION_NUM < 15
+	/*
+	 * In PG14 MaxBackends is not initialized yet when this is called, and the
+	 * registry is sized by it. Same workaround as NeonPerfCountersShmemRequest().
+	 */
+	Size		size;
+
+	Assert(MaxBackends == 0);
+	InitializeMaxBackends();
+	size = UnloggedBuildRegistrySize();
+	MaxBackends = 0;
+	RequestAddinShmemSpace(size);
+#else
 	RequestAddinShmemSpace(UnloggedBuildRegistrySize());
+#endif
 }
 
 void
