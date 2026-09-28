@@ -492,8 +492,11 @@ jobs:
           pull: true
           file: Dockerfile
           # Upstream keeps its layer cache in the private cache.neon.build registry; keep it next to the image in GHCR instead.
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/neon:cache-bookworm-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/neon:cache-{1}-{2},mode=max', github.repository_owner, 'bookworm', matrix.arch) || '' }}
+          # PRs also keep a cache of their own (cache-pr<N>-*), read on top of main's and never written to main's.
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/neon:cache-bookworm-${{ matrix.arch }}
+            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/neon:cache-pr{1}-{2}-{3}', github.repository_owner, github.event.pull_request.number, 'bookworm', matrix.arch) || '' }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/neon:cache-{1}-{2},mode=max', github.repository_owner, 'bookworm', matrix.arch) || github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/neon:cache-pr{1}-{2}-{3},mode=max', github.repository_owner, github.event.pull_request.number, 'bookworm', matrix.arch) || '' }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/neon:${{ needs.meta.outputs.build-tag }}-bookworm-${{ matrix.arch }}
 
@@ -594,8 +597,11 @@ jobs:
           pull: true
           file: compute/compute-node.Dockerfile
           # Upstream keeps its layer cache in the private cache.neon.build registry; keep it next to the image in GHCR instead.
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-{2}-{3},mode=max', github.repository_owner, matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
+          # PRs also keep a cache of their own (cache-pr<N>-*), read on top of main's and never written to main's.
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-pr{2}-{3}-{4}', github.repository_owner, matrix.version.pg, github.event.pull_request.number, matrix.version.debian, matrix.arch) || '' }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-{2}-{3},mode=max', github.repository_owner, matrix.version.pg, matrix.version.debian, matrix.arch) || github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-pr{2}-{3}-{4},mode=max', github.repository_owner, matrix.version.pg, github.event.pull_request.number, matrix.version.debian, matrix.arch) || '' }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
@@ -616,7 +622,9 @@ jobs:
           pull: true
           file: compute/compute-node.Dockerfile
           target: extension-tests
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-pr{2}-{3}-{4}', github.repository_owner, matrix.version.pg, github.event.pull_request.number, matrix.version.debian, matrix.arch) || '' }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 

@@ -144,8 +144,11 @@ jobs:
           build-args: |
             DEBIAN_VERSION=${{ matrix.debian }}
           # Upstream keeps its layer cache in the private cache.neon.build registry; keep it next to the image in GHCR instead.
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-{1}-{2},mode=max', github.repository_owner, matrix.debian, matrix.arch) || '' }}
+          # PRs also keep a cache of their own (cache-pr<N>-*), read on top of main's and never written to main's.
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
+            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-pr{1}-{2}-{3}', github.repository_owner, github.event.pull_request.number, matrix.debian, matrix.arch) || '' }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-{1}-{2},mode=max', github.repository_owner, matrix.debian, matrix.arch) || github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-pr{1}-{2}-{3},mode=max', github.repository_owner, github.event.pull_request.number, matrix.debian, matrix.arch) || '' }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 
