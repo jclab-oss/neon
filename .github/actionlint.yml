@@ -35,7 +35,9 @@ config-variables:
   - REMOTE_STORAGE_AZURE_CONTAINER
   - REMOTE_STORAGE_AZURE_REGION
   # This fork's replacements for upstream's self-hosted runner labels (`small`, `small-arm64`, `large`,
-  # `large-arm64`, `large-metal`); each defaults to a GitHub-hosted runner when unset.
+  # `large-arm64`, `large-metal`); each defaults to a GitHub-hosted runner when unset. The value is either a
+  # single runner label (`github-ubuntu-2404-x64-8x`) or a JSON array of labels the runner must all have
+  # (`["self-hosted", "linux", "x64"]`), as `runs-on` accepts.
   - RUNNER_LARGE
   - RUNNER_LARGE_ARM64
   - RUNNER_LARGE_METAL

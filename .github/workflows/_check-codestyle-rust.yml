@@ -24,7 +24,7 @@ jobs:
     strategy:
       matrix:
         arch: ${{ fromJSON(inputs.archs) }}
-    runs-on: ${{ matrix.arch == 'arm64' && (vars.RUNNER_SMALL_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_SMALL || 'ubuntu-22.04') }}
+    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_SMALL_ARM64, '[') && fromJSON(vars.RUNNER_SMALL_ARM64) || vars.RUNNER_SMALL_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04') }}
 
     permissions:
       packages: read

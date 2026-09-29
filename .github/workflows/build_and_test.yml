@@ -31,7 +31,7 @@ jobs:
 
   files-changed:
     needs: [ check-permissions ]
-    runs-on: ${{ vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     timeout-minutes: 3
     outputs:
       check-rust-dependencies: ${{ steps.files-changed.outputs.rust_dependencies }}
@@ -75,7 +75,7 @@ jobs:
     needs: [ meta, check-permissions, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
     if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: ${{ vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -112,7 +112,7 @@ jobs:
     needs: [ meta, check-permissions, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
     if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: ${{ vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -265,7 +265,7 @@ jobs:
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
-    runs-on: ${{ vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
@@ -329,7 +329,7 @@ jobs:
     permissions:
       statuses: write
       contents: write
-    runs-on: ${{ vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
@@ -446,7 +446,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ matrix.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE || 'ubuntu-22.04') }}
+    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
 
     permissions:
       packages: write
@@ -553,7 +553,7 @@ jobs:
             debian: bookworm
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ matrix.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE || 'ubuntu-22.04') }}
+    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -680,7 +680,7 @@ jobs:
   vm-compute-node-image-arch:
     needs: [ check-permissions, meta, compute-node-image ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: ${{ matrix.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE || 'ubuntu-22.04') }}
+    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
     permissions:
       contents: read
       packages: write
@@ -789,7 +789,7 @@ jobs:
     permissions:
       packages: read
 
-    runs-on: ${{ matrix.arch == 'arm64' && (vars.RUNNER_SMALL_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_SMALL || 'ubuntu-22.04') }}
+    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_SMALL_ARM64, '[') && fromJSON(vars.RUNNER_SMALL_ARM64) || vars.RUNNER_SMALL_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04') }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -987,7 +987,7 @@ jobs:
     permissions:
       statuses: write
       contents: write
-    runs-on: ${{ vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0

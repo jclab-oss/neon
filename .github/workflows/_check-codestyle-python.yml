@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   check-codestyle-python:
-    runs-on: ${{ vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
 
     permissions:
       packages: read

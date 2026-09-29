@@ -57,7 +57,7 @@ permissions:
 
 jobs:
   build-neon:
-    runs-on: ${{ inputs.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE || 'ubuntu-22.04') }}
+    runs-on: ${{ inputs.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
     permissions:
       contents: read
     container:
@@ -315,7 +315,7 @@ jobs:
       contents: read
       statuses: write
     needs: [ build-neon ]
-    runs-on: ${{ inputs.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE_METAL || 'ubuntu-22.04') }}
+    runs-on: ${{ inputs.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE_METAL, '[') && fromJSON(vars.RUNNER_LARGE_METAL) || vars.RUNNER_LARGE_METAL || 'ubuntu-22.04') }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:

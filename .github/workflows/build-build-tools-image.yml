@@ -111,8 +111,8 @@ jobs:
       packages: write
 
     # Upstream's self-hosted `large`/`large-arm64` runners, mapped to GitHub-hosted runners
-    # (override with the RUNNER_LARGE/RUNNER_LARGE_ARM64 repository variables).
-    runs-on: ${{ matrix.arch == 'arm64' && (vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (vars.RUNNER_LARGE || 'ubuntu-22.04') }}
+    # (override with the RUNNER_LARGE/RUNNER_LARGE_ARM64 repository variables: a label, or a JSON array of labels).
+    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
