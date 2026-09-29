@@ -1289,8 +1289,11 @@ mod tests {
         let testdir = crate::config::PageServerConf::test_repo_dir("test_virtual_files");
         std::fs::create_dir_all(&testdir)?;
 
-        let zeropad512 = |content: &[u8]| {
-            let mut buf = IoBufferMut::with_capacity_zeroed(512);
+        // One direct IO block: 512 bytes, or 4096 with the `io-align-4k` feature
+        const BLOCK_SIZE: usize = get_io_buffer_alignment();
+
+        let zeropad_block = |content: &[u8]| {
+            let mut buf = IoBufferMut::with_capacity_zeroed(BLOCK_SIZE);
             buf[..content.len()].copy_from_slice(content);
             buf.freeze().slice_len()
         };
@@ -1309,7 +1312,9 @@ mod tests {
             &ctx,
         )
         .await?;
-        let (_, res) = file_a.write_all_at(zeropad512(b"content_a"), 0, &ctx).await;
+        let (_, res) = file_a
+            .write_all_at(zeropad_block(b"content_a"), 0, &ctx)
+            .await;
         res?;
 
         let path_b = testdir.join("file_b");
@@ -1323,15 +1328,21 @@ mod tests {
             &ctx,
         )
         .await?;
-        let (_, res) = file_b.write_all_at(zeropad512(b"content_b"), 0, &ctx).await;
+        let (_, res) = file_b
+            .write_all_at(zeropad_block(b"content_b"), 0, &ctx)
+            .await;
         res?;
 
-        let assert_first_512_eq = async |vfile: &VirtualFile, expect: &[u8]| {
+        let assert_first_block_eq = async |vfile: &VirtualFile, expect: &[u8]| {
             let buf = vfile
-                .read_exact_at(IoBufferMut::with_capacity_zeroed(512).slice_full(), 0, &ctx)
+                .read_exact_at(
+                    IoBufferMut::with_capacity_zeroed(BLOCK_SIZE).slice_full(),
+                    0,
+                    &ctx,
+                )
                 .await
                 .unwrap();
-            assert_eq!(&buf[..], &zeropad512(expect)[..]);
+            assert_eq!(&buf[..], &zeropad_block(expect)[..]);
         };
 
         // Open a lot of file descriptors / VirtualFile instances.
@@ -1345,7 +1356,7 @@ mod tests {
                 &ctx,
             )
             .await?;
-            assert_first_512_eq(&vfile, b"content_b").await;
+            assert_first_block_eq(&vfile, b"content_b").await;
             file_b_dupes.push(vfile);
         }
 
@@ -1354,13 +1365,13 @@ mod tests {
 
         // The underlying file descriptor for 'file_a' should be closed now. Try to read
         // from it again. The VirtualFile reopens the file internally.
-        assert_first_512_eq(&file_a, b"content_a").await;
+        assert_first_block_eq(&file_a, b"content_a").await;
 
         // Check that all the other FDs still work too. Use them in random order for
         // good measure.
         file_b_dupes.as_mut_slice().shuffle(&mut rand::rng());
         for vfile in file_b_dupes.iter_mut() {
-            assert_first_512_eq(vfile, b"content_b").await;
+            assert_first_block_eq(vfile, b"content_b").await;
         }
 
         Ok(())
