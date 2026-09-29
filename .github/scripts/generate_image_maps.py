@@ -9,18 +9,14 @@ branch = os.getenv("BRANCH")
 # Upstream pushes from ghcr.io/neondatabase to Docker Hub and to Neon's ECR/ACR registries (dev and prod).
 # This fork only has its own GHCR namespace, e.g. ghcr.io/<owner>.
 registry = os.getenv("REGISTRY", "ghcr.io/neondatabase")
+# Build and Test may only build the compute images of some Postgres versions, e.g. "v16,v17"
+pg_versions = os.getenv("PG_VERSIONS") or "v14,v15,v16,v17"
 
 components = {
     "neon": ["neon"],
     "compute": [
-        "compute-node-v14",
-        "compute-node-v15",
-        "compute-node-v16",
-        "compute-node-v17",
-        "vm-compute-node-v14",
-        "vm-compute-node-v15",
-        "vm-compute-node-v16",
-        "vm-compute-node-v17",
+        *(f"compute-node-{pg_version}" for pg_version in pg_versions.split(",")),
+        *(f"vm-compute-node-{pg_version}" for pg_version in pg_versions.split(",")),
     ],
 }
 

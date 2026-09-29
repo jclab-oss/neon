@@ -29,6 +29,9 @@ config-variables:
   - HETZNER_CACHE_REGION
   - NEON_DEV_AWS_ACCOUNT_ID
   - NEON_PROD_AWS_ACCOUNT_ID
+  # Postgres versions Build and Test builds compute images for and runs the per-version tests on, e.g.
+  # `v16,v17`; all of them when unset. A manual run's `pg-versions` input takes precedence.
+  - PG_VERSIONS
   - PGREGRESS_PG16_PROJECT_ID
   - PGREGRESS_PG17_PROJECT_ID
   - PREWARM_PROJECT_ID

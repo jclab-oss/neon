@@ -8,6 +8,14 @@ on:
       - release-proxy
       - release-compute
   pull_request:
+  # Manual runs, handled like a PR run (run-kind `workflow-dispatch`).
+  workflow_dispatch:
+    inputs:
+      pg-versions:
+        description: 'Postgres versions to build and test, e.g. "v16,v17" (empty: the PG_VERSIONS repository variable, or else all of them)'
+        type: string
+        required: false
+        default: ''
 
 defaults:
   run:
@@ -61,6 +69,84 @@ jobs:
       github-event-name: ${{ github.event_name }}
       github-event-json: ${{ toJSON(github.event) }}
 
+  # The Postgres versions to build compute images for and to run the per-version tests on: the `pg-versions`
+  # input of a manual run, else the PG_VERSIONS repository variable, else all of them. Either is a
+  # comma-separated list like `v16,v17` (or `16,17`). `build-neon` still builds every version: the Rust
+  # code (libs/postgres_ffi) needs all of them.
+  pg-versions:
+    needs: [ meta ]
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
+    outputs:
+      versions: ${{ steps.select.outputs.versions }}
+      compute: ${{ steps.select.outputs.compute }}
+      test-extensions: ${{ steps.select.outputs.test-extensions }}
+      release-test-cfg: ${{ steps.select.outputs.release-test-cfg }}
+      debug-test-cfg: ${{ steps.select.outputs.debug-test-cfg }}
+      test-extensions-latest-map: ${{ steps.select.outputs.test-extensions-latest-map }}
+      test-extensions-release-map: ${{ steps.select.outputs.test-extensions-release-map }}
+    steps:
+      - name: Select Postgres versions
+        id: select
+        env:
+          PG_VERSIONS: ${{ inputs.pg-versions || vars.PG_VERSIONS }}
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+          BUILD_TAG: ${{ needs.meta.outputs.build-tag }}
+          RELEASE_PR_RUN_ID: ${{ needs.meta.outputs.release-pr-run-id }}
+        shell: python3 {0}
+        run: |
+          import json, os, sys
+
+          # Much data was already generated on old PG versions with bullseye's
+          # libraries, the locales of which can cause data incompatibilities.
+          # However, new PG versions should be build on newer images,
+          # as that reduces the support burden of old and ancient distros.
+          debian = {"v14": "bullseye", "v15": "bullseye", "v16": "bullseye", "v17": "bookworm"}
+
+          requested = os.environ["PG_VERSIONS"].strip()
+          if requested:
+              versions = []
+              for item in requested.split(","):
+                  item = item.strip()
+                  if not item:
+                      continue
+                  version = item if item.startswith("v") else f"v{item}"
+                  if version not in debian:
+                      sys.exit(f"Unknown Postgres version {item!r} in {requested!r}, expected some of {', '.join(debian)}")
+                  if version not in versions:
+                      versions.append(version)
+              if not versions:
+                  sys.exit(f"No Postgres versions in {requested!r}")
+          else:
+              versions = list(debian)
+          versions.sort(key=lambda v: int(v[1:]))
+          # neon-test-extensions images (and test-images) only exist for these versions
+          test_extensions = [v for v in versions if v in ("v16", "v17")]
+
+          registry, build_tag = os.environ["REGISTRY"], os.environ["BUILD_TAG"]
+          release_pr_run_id = os.environ["RELEASE_PR_RUN_ID"]
+          outputs = {
+              "versions": versions,
+              "compute": [{"pg": v, "debian": debian[v]} for v in versions],
+              "test-extensions": test_extensions,
+              # Release builds run the tests on every version with LFC, and on v17 without it as well;
+              # debug builds only on the latest version, without LFC.
+              "release-test-cfg": [{"pg_version": v, "lfc_state": "with-lfc"} for v in versions]
+              + [{"pg_version": "v17", "lfc_state": "without-lfc"} for v in versions if v == "v17"],
+              "debug-test-cfg": [{"pg_version": versions[-1], "lfc_state": "without-lfc"}],
+              "test-extensions-latest-map": {
+                  f"{registry}/neon-test-extensions-{v}:{build_tag}": [f"{registry}/neon-test-extensions-{v}:latest"]
+                  for v in test_extensions
+              },
+              "test-extensions-release-map": {
+                  f"{registry}/neon-test-extensions-{v}:{release_pr_run_id}": [f"{registry}/neon-test-extensions-{v}:{build_tag}"]
+                  for v in test_extensions
+              },
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              for key, value in outputs.items():
+                  f.write(f"{key}={json.dumps(value)}\n")
+                  print(f"{key}: {json.dumps(value)}")
+
   build-build-tools-image:
     needs: [ check-permissions ]
     # Reusable workflows can't get more permissions than their caller grants, and this repo's default
@@ -74,7 +160,7 @@ jobs:
   lint-yamls:
     needs: [ meta, check-permissions, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["pr", "workflow-dispatch", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -102,7 +188,7 @@ jobs:
   check-codestyle-python:
     needs: [ meta, check-permissions, build-build-tools-image ]
     # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -111,7 +197,7 @@ jobs:
   check-codestyle-jsonnet:
     needs: [ meta, check-permissions, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["pr", "workflow-dispatch", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -200,7 +286,7 @@ jobs:
   check-codestyle-rust:
     needs: [ meta, check-permissions, build-build-tools-image ]
     # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_check-codestyle-rust.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -210,16 +296,16 @@ jobs:
   check-dependencies-rust:
     needs: [ meta, files-changed, build-build-tools-image ]
     # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' && contains(fromJSON('["pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/cargo-deny.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
 
   build-and-test-locally:
-    needs: [ meta, build-build-tools-image ]
+    needs: [ meta, pg-versions, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["pr", "workflow-dispatch", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     # Reusable workflows can't get more permissions than their caller grants, and this repo's default
     # GITHUB_TOKEN is read-only (upstream's is read-write), so grant what the called jobs request.
     permissions:
@@ -240,15 +326,10 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       build-tag: ${{ needs.meta.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
-      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds.
+      # Run tests on all (selected) Postgres versions in release builds and only on the latest version in debug builds.
       # Run without LFC on v17 release and debug builds only. For all the other cases LFC is enabled.
-      test-cfg: |
-        ${{ matrix.build-type == 'release' && '[{"pg_version":"v14", "lfc_state": "with-lfc"},
-                                                {"pg_version":"v15", "lfc_state": "with-lfc"},
-                                                {"pg_version":"v16", "lfc_state": "with-lfc"},
-                                                {"pg_version":"v17", "lfc_state": "with-lfc"},
-                                                {"pg_version":"v17", "lfc_state": "without-lfc"}]'
-                                           || '[{"pg_version":"v17", "lfc_state": "without-lfc" }]' }}
+      # See the `pg-versions` job.
+      test-cfg: ${{ matrix.build-type == 'release' && needs.pg-versions.outputs.release-test-cfg || needs.pg-versions.outputs.debug-test-cfg }}
     secrets: inherit
 
   # Upstream's `get-benchmarks-durations`, `benchmarks` and `report-benchmarks-results-to-slack` jobs are
@@ -441,7 +522,7 @@ jobs:
 
   neon-image-arch:
     needs: [ check-permissions, build-build-tools-image, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     strategy:
       matrix:
         arch: [ x64, arm64 ]
@@ -502,7 +583,7 @@ jobs:
 
   neon-image:
     needs: [ neon-image-arch, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ubuntu-22.04
     permissions:
       statuses: write
@@ -529,8 +610,8 @@ jobs:
                                              ghcr.io/${{ github.repository_owner }}/neon:${{ needs.meta.outputs.build-tag }}-bookworm-arm64
 
   compute-node-image-arch:
-    needs: [ check-permissions, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    needs: [ check-permissions, meta, pg-versions ]
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       statuses: write
       contents: read
@@ -538,19 +619,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version:
-          # Much data was already generated on old PG versions with bullseye's
-          # libraries, the locales of which can cause data incompatibilities.
-          # However, new PG versions should be build on newer images,
-          # as that reduces the support burden of old and ancient distros.
-          - pg: v14
-            debian: bullseye
-          - pg: v15
-            debian: bullseye
-          - pg: v16
-            debian: bullseye
-          - pg: v17
-            debian: bookworm
+        # The selected Postgres versions, each with its Debian version: see the `pg-versions` job.
+        version: ${{ fromJSON(needs.pg-versions.outputs.compute) }}
         arch: [ x64, arm64 ]
 
     runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
@@ -629,8 +699,8 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
   compute-node-image:
-    needs: [ compute-node-image-arch, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    needs: [ compute-node-image-arch, meta, pg-versions ]
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       statuses: write
       contents: read
@@ -639,16 +709,8 @@ jobs:
 
     strategy:
       matrix:
-        version:
-          # see the comment for `compute-node-image-arch` job
-          - pg: v14
-            debian: bullseye
-          - pg: v15
-            debian: bullseye
-          - pg: v16
-            debian: bullseye
-          - pg: v17
-            debian: bookworm
+        # see the comment for `compute-node-image-arch` job
+        version: ${{ fromJSON(needs.pg-versions.outputs.compute) }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -678,8 +740,8 @@ jobs:
                                              ghcr.io/${{ github.repository_owner }}/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
   vm-compute-node-image-arch:
-    needs: [ check-permissions, meta, compute-node-image ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    needs: [ check-permissions, meta, pg-versions, compute-node-image ]
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
     permissions:
       contents: read
@@ -688,15 +750,8 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ amd64, arm64 ]
-        version:
-          - pg: v14
-            debian: bullseye
-          - pg: v15
-            debian: bullseye
-          - pg: v16
-            debian: bullseye
-          - pg: v17
-            debian: bookworm
+        # see the comment for `compute-node-image-arch` job
+        version: ${{ fromJSON(needs.pg-versions.outputs.compute) }}
     env:
       VM_BUILDER_VERSION: v0.46.0
 
@@ -739,19 +794,15 @@ jobs:
           docker push ghcr.io/${{ github.repository_owner }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
 
   vm-compute-node-image:
-    needs: [ vm-compute-node-image-arch, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    needs: [ vm-compute-node-image-arch, meta, pg-versions ]
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       packages: write
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        version:
-          # see the comment for `compute-node-image-arch` job
-          - pg: v14
-          - pg: v15
-          - pg: v16
-          - pg: v17
+        # see the comment for `compute-node-image-arch` job
+        version: ${{ fromJSON(needs.pg-versions.outputs.compute) }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
@@ -772,19 +823,21 @@ jobs:
 
 
   test-images:
-    needs: [ check-permissions, meta, neon-image, compute-node-image ]
+    needs: [ check-permissions, meta, pg-versions, neon-image, compute-node-image ]
     # Depends on jobs that can get skipped
     if: >-
       ${{
         !failure()
         && !cancelled()
-        && contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+        && contains(fromJSON('["push-main", "pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+        && needs.pg-versions.outputs.test-extensions != '[]'
       }}
     strategy:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
-        pg_version: [v16, v17]
+        # v16 and v17, if selected: see the `pg-versions` job
+        pg_version: ${{ fromJSON(needs.pg-versions.outputs.test-extensions) }}
 
     permissions:
       packages: read
@@ -815,7 +868,7 @@ jobs:
       # Ensure that we don't have bad versions.
       - name: Verify image versions
         shell: bash # ensure no set -e for better error messages
-        if: ${{ contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+        if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
         run: |
           pageserver_version=$(docker run --rm ghcr.io/${{ github.repository_owner }}/neon:${{ needs.meta.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
@@ -867,12 +920,12 @@ jobs:
       - name: Test extension upgrade
         timeout-minutes: 20
         # Needs a previous compute release to upgrade from, which this fork may not have (yet)
-        if: ${{ contains(fromJSON('["pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) && needs.meta.outputs.previous-compute-release != '' }}
+        if: ${{ contains(fromJSON('["pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) && needs.meta.outputs.previous-compute-release != '' }}
         env:
           TAG: >-
             ${{
               false
-              || needs.meta.outputs.run-kind == 'pr' && needs.meta.outputs.build-tag
+              || contains(fromJSON('["pr", "workflow-dispatch"]'), needs.meta.outputs.run-kind) && needs.meta.outputs.build-tag
               || needs.meta.outputs.run-kind == 'compute-rc-pr' && needs.meta.outputs.previous-storage-release
             }}
           TEST_EXTENSIONS_TAG: ${{ needs.meta.outputs.previous-compute-release }}
@@ -888,7 +941,7 @@ jobs:
           docker compose --profile test-extensions -f ./docker-compose/docker-compose.yml down
 
   generate-image-maps:
-    needs: [ meta ]
+    needs: [ meta, pg-versions ]
     runs-on: ubuntu-22.04
     outputs:
       neon-dev: ${{ steps.generate.outputs.neon-dev }}
@@ -917,10 +970,12 @@ jobs:
           TARGET_TAG: ${{ needs.meta.outputs.build-tag }}
           BRANCH: "${{ github.ref_name }}"
           REGISTRY: ghcr.io/${{ github.repository_owner }}
+          # Only the compute images of the selected Postgres versions are built: see the `pg-versions` job
+          PG_VERSIONS: ${{ join(fromJSON(needs.pg-versions.outputs.versions), ',') }}
 
   push-neon-image-dev:
     needs: [ meta, generate-image-maps, neon-image ]
-    if: ${{ !failure() && !cancelled() && contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ !failure() && !cancelled() && contains(fromJSON('["push-main", "pr", "workflow-dispatch", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       packages: write  # required for pushing to GHCR
@@ -930,7 +985,7 @@ jobs:
 
   push-compute-image-dev:
     needs: [ meta, generate-image-maps, vm-compute-node-image ]
-    if: ${{ !failure() && !cancelled() && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ !failure() && !cancelled() && contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       packages: write  # required for pushing to GHCR
@@ -941,40 +996,25 @@ jobs:
   # Upstream's `push-neon-image-prod`, `push-compute-image-prod` and `push-neon-test-extensions-image-dockerhub`
   # jobs are dropped: they only push to Neon's production ECR/ACR registries and to Docker Hub.
 
+  # The neon-test-extensions-v16/v17 images, if selected: see the `pg-versions` job
   add-latest-tag-to-neon-test-extensions-image:
-    if: ${{ needs.meta.outputs.run-kind == 'push-main' }}
-    needs: [ meta, compute-node-image ]
+    if: ${{ needs.meta.outputs.run-kind == 'push-main' && needs.pg-versions.outputs.test-extensions != '[]' }}
+    needs: [ meta, pg-versions, compute-node-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       packages: write
     with:
-      image-map: |
-        {
-          "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": [
-            "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v16:latest"
-          ],
-          "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": [
-            "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v17:latest"
-          ]
-        }
+      image-map: ${{ needs.pg-versions.outputs.test-extensions-latest-map }}
     secrets: inherit
 
   add-release-tag-to-neon-test-extensions-image:
-    if: ${{ needs.meta.outputs.run-kind == 'compute-release' }}
-    needs: [ meta ]
+    if: ${{ needs.meta.outputs.run-kind == 'compute-release' && needs.pg-versions.outputs.test-extensions != '[]' }}
+    needs: [ meta, pg-versions ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       packages: write
     with:
-      image-map: |
-        {
-          "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v16:${{ needs.meta.outputs.release-pr-run-id }}": [
-            "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}"
-          ],
-          "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v17:${{ needs.meta.outputs.release-pr-run-id }}": [
-            "ghcr.io/${{ github.repository_owner }}/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}"
-          ]
-        }
+      image-map: ${{ needs.pg-versions.outputs.test-extensions-release-map }}
     secrets: inherit
 
   # Upstream's `trigger-custom-extensions-build-and-wait` job is dropped: it builds extensions in the
@@ -1116,6 +1156,7 @@ jobs:
     # Usually we do `needs: [...]`
     needs:
       - meta
+      - pg-versions
       - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
@@ -1138,11 +1179,11 @@ jobs:
         if: |
           contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
-          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
-          || (needs.build-and-test-locally.result == 'skipped' && contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
-          || (needs.check-codestyle-python.result == 'skipped' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
-          || (needs.check-codestyle-rust.result == 'skipped' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true' && contains(fromJSON('["pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.build-and-test-locally.result == 'skipped' && contains(fromJSON('["pr", "workflow-dispatch", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.check-codestyle-python.result == 'skipped' && contains(fromJSON('["pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.check-codestyle-rust.result == 'skipped' && contains(fromJSON('["pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
           || needs.files-changed.result == 'skipped'
-          || (needs.push-compute-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
-          || (needs.push-neon-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind))
-          || (needs.test-images.result == 'skipped' && contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.push-compute-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.push-neon-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "workflow-dispatch", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.test-images.result == 'skipped' && contains(fromJSON('["push-main", "pr", "workflow-dispatch", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) && needs.pg-versions.outputs.test-extensions != '[]')
