@@ -885,6 +885,12 @@ jobs:
             exit 1
           fi
 
+      # docker-compose.yml bind-mounts docker-compose/pageserver_config as the pageserver's data directory,
+      # and the neon image runs as `neon` (uid 1000): let it create its files there on runners whose user
+      # isn't uid 1000 (e.g. GitHub-hosted runners' uid 1001).
+      - name: Make the pageserver's data directory writable
+        run: chmod a+w docker-compose/pageserver_config
+
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 60
         env:
