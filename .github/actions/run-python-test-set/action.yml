@@ -152,7 +152,12 @@ runs:
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
           # -n sets the number of parallel processes that pytest-xdist will run.
           # Upstream hardcodes 12 for its large-metal runners; use this runner's CPU count instead.
-          EXTRA_PARAMS="-n$(nproc) $EXTRA_PARAMS"
+          # Debug binaries are much heavier, so give them half the workers.
+          WORKERS=$(nproc)
+          if [[ "${BUILD_TYPE}" == "debug" ]]; then
+            WORKERS=$(( WORKERS / 2 > 0 ? WORKERS / 2 : 1 ))
+          fi
+          EXTRA_PARAMS="-n${WORKERS} $EXTRA_PARAMS"
 
           # --dist=loadgroup points tests marked with @pytest.mark.xdist_group
           # to the same worker to make @pytest.mark.order work with xdist
