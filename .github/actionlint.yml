@@ -27,6 +27,9 @@ config-variables:
   - HETZNER_CACHE_BUCKET
   - HETZNER_CACHE_ENDPOINT
   - HETZNER_CACHE_REGION
+  # The pageserver's O_DIRECT buffer alignment (`512` or `4k`) Build and Test builds the neon image and the
+  # tests with, for runners whose disk has 4096-byte logical sectors; upstream's `512` when unset.
+  - IO_ALIGNMENT
   - NEON_DEV_AWS_ACCOUNT_ID
   - NEON_PROD_AWS_ACCOUNT_ID
   # Postgres versions Build and Test builds compute images for and runs the per-version tests on, e.g.

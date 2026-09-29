@@ -565,6 +565,7 @@ jobs:
             REPOSITORY=ghcr.io/${{ github.repository_owner }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm
             DEBIAN_VERSION=bookworm
+            IO_ALIGNMENT=${{ vars.IO_ALIGNMENT || '512' }}
           # No SUBZERO_ACCESS_TOKEN secret: the Dockerfile then builds against the in-tree subzero-core stub
           attests: |
             type=provenance,mode=max
