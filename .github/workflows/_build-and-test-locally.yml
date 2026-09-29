@@ -132,7 +132,7 @@ jobs:
           # The pageserver's O_DIRECT buffer alignment, as the Dockerfile's IO_ALIGNMENT build argument:
           # runners whose disk has 4096-byte logical sectors need `4k`
           case "$IO_ALIGNMENT" in
-            4k) CARGO_FLAGS="${CARGO_FLAGS},pageserver/io-align-4k" ;;
+            4k) CARGO_FLAGS="${CARGO_FLAGS},io-align-4k" ;;
             512|"") ;;
             *) echo >&2 "Unexpected IO_ALIGNMENT '${IO_ALIGNMENT}', expected '4k' or '512'"; exit 1 ;;
           esac
