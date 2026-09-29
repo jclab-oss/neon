@@ -55,9 +55,9 @@ jobs:
         with:
           submodules: true
       
-      - uses: ./.github/actions/prepare-for-subzero
-        with:
-          token: ${{ secrets.CI_ACCESS_TOKEN }}
+      # No prepare-for-subzero: it fetches the real subzero-core crate from the private
+      # neondatabase/subzero repo, which this fork cannot access; `make all` here doesn't enable the
+      # `rest_broker` feature that needs it.
 
       - name: Install build dependencies
         run: |
@@ -124,5 +124,10 @@ jobs:
       - name: Build all
         run: PG_INSTALL_CACHED=1 BUILD_TYPE=release make -j$(sysctl -n hw.ncpu) all
 
+      # run_clippy.sh, but with all features except `rest_broker` rather than `--all-features`:
+      # proxy does not compile against the in-tree libs/proxy/subzero_core stub with it enabled.
       - name: Check that no warnings are produced
-        run: ./run_clippy.sh
+        run: |
+          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
+          features=$(cargo metadata --locked --format-version=1 --no-deps | jq -r '[.packages[].features | keys[]] | unique - ["default", "rest_broker"] | join(",")')
+          cargo clippy --features "$features" $CLIPPY_COMMON_ARGS
