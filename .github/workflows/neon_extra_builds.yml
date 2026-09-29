@@ -28,6 +28,11 @@ jobs:
 
   build-build-tools-image:
     needs: [ check-permissions ]
+    # Reusable workflows can't get more permissions than their caller grants, and this repo's default
+    # GITHUB_TOKEN is read-only (upstream's is read-write), so grant what the called jobs request.
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
