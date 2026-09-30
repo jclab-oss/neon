@@ -196,7 +196,13 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
+      # This fork's runners (GitHub-hosted and self-hosted alike) run as uid 1001 and own the workspace,
+      # /__w/_temp and /github/home, while the build-tools image runs as `nonroot` (uid 1000): run as 1001
+      # (non-root, as initdb requires) and borrow the host's passwd entry for it.
+      # options: --init
+      options: --init --user 1001:1001
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -234,7 +240,13 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
+      # This fork's runners (GitHub-hosted and self-hosted alike) run as uid 1001 and own the workspace,
+      # /__w/_temp and /github/home, while the build-tools image runs as `nonroot` (uid 1000): run as 1001
+      # (non-root, as initdb requires) and borrow the host's passwd entry for it.
+      # options: --init
+      options: --init --user 1001:1001
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -519,7 +531,13 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
+      # This fork's runners (GitHub-hosted and self-hosted alike) run as uid 1001 and own the workspace,
+      # /__w/_temp and /github/home, while the build-tools image runs as `nonroot` (uid 1000): run as 1001
+      # (non-root, as initdb requires) and borrow the host's passwd entry for it.
+      # options: --init
+      options: --init --user 1001:1001
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -588,7 +606,13 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
+      # This fork's runners (GitHub-hosted and self-hosted alike) run as uid 1001 and own the workspace,
+      # /__w/_temp and /github/home, while the build-tools image runs as `nonroot` (uid 1000): run as 1001
+      # (non-root, as initdb requires) and borrow the host's passwd entry for it.
+      # options: --init
+      options: --init --user 1001:1001
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
     strategy:
       fail-fast: false
       matrix:
@@ -1277,6 +1301,12 @@ jobs:
             echo "Pageserver version should have no testing feature enabled"
             exit 1
           fi
+
+      # docker-compose.yml bind-mounts docker-compose/pageserver_config as the pageserver's data directory,
+      # and the neon image runs as `neon` (uid 1000): let it create its files there, as this fork's runners
+      # run as uid 1001.
+      - name: Make the pageserver's data directory writable
+        run: chmod a+w docker-compose/pageserver_config
 
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 60

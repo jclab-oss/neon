@@ -76,8 +76,13 @@ jobs:
       # --ulimit nofile, `seccomp=unconfined` and `apparmor=unconfined` are needed on this fork's runners:
       # Docker's default seccomp profile blocks io_uring (tokio-epoll-uring fails with EPERM), and on
       # nested runners the stacked AppArmor label makes kill(2) of our own children fail with EACCES.
+      # This fork's runners (GitHub-hosted and self-hosted alike) run as uid 1001 and own the workspace,
+      # /__w/_temp and /github/home, while the build-tools image runs as `nonroot` (uid 1000): run as 1001
+      # (non-root, as initdb requires) and borrow the host's passwd entry for it.
       # options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --user 1001:1001 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
     env:
       BUILD_TYPE: ${{ inputs.build-type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -397,9 +402,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # for changed limits, see comments on `options:` earlier in this file
+      # for changed limits and --user, see comments on `options:` earlier in this file
       # options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --user 1001:1001 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(format('{{"include":{0}}}', inputs.test-cfg)) }}
