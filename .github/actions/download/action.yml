@@ -13,56 +13,87 @@ inputs:
     default: false
     required: false
   prefix:
-    description: "S3 prefix. Default is '${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
+    # description: "S3 prefix. Default is '${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
+    description: >
+      S3 prefix upstream uses to fetch artifacts of *other* runs (e.g. `latest` for the previous release).
+      Artifacts are GitHub Actions artifacts of the current run here, so when a prefix is given the artifact
+      is treated as missing (see `skip-if-does-not-exist`).
     required: false
   aws-oidc-role-arn:
-    description: 'OIDC role arn to interract with S3'
-    required: true
+    # Unused: this fork has no access to AWS/S3. Kept so that callers passing it stay valid
+    # description: 'OIDC role arn to interract with S3'
+    # required: true
+    required: false
+    default: ''
 
 runs:
   using: "composite"
   steps:
-    - uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-region: eu-central-1
-        role-to-assume: ${{ inputs.aws-oidc-role-arn }}
-        role-duration-seconds: 3600
+    # This fork has no access to AWS/S3: artifacts are GitHub Actions artifacts of the current run
+    # (see the `upload` action), each containing a single `<name>.tar.zst`.
+    # - uses: aws-actions/configure-aws-credentials@v4
+    #   with:
+    #     aws-region: eu-central-1
+    #     role-to-assume: ${{ inputs.aws-oidc-role-arn }}
+    #     role-duration-seconds: 3600
 
     - name: Download artifact
       id: download-artifact
+      # Artifacts of other runs (a non-empty prefix) aren't reachable, see the `prefix` input.
+      if: inputs.prefix == ''
+      # Upstream downloads from S3 with the script below; a missing artifact is handled in "Extract artifact".
+      # shell: bash -euxo pipefail {0}
+      # env:
+      #   TARGET: ${{ inputs.path }}
+      #   ARCHIVE: /tmp/downloads/${{ inputs.name }}.tar.zst
+      #   SKIP_IF_DOES_NOT_EXIST: ${{ inputs.skip-if-does-not-exist }}
+      #   PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}/{2}', github.event.pull_request.head.sha || github.sha, github.run_id, github.run_attempt) }}
+      # run: |
+      #   BUCKET=neon-github-public-dev
+      #   FILENAME=$(basename $ARCHIVE)
+      #
+      #   S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX%$GITHUB_RUN_ATTEMPT} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
+      #   if [ -z "${S3_KEY}" ]; then
+      #     if [ "${SKIP_IF_DOES_NOT_EXIST}" = "true" ]; then
+      #       echo 'SKIPPED=true' >> $GITHUB_OUTPUT
+      #       exit 0
+      #     else
+      #       echo >&2 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
+      #       exit 1
+      #     fi
+      #   fi
+      #
+      #   echo 'SKIPPED=false' >> $GITHUB_OUTPUT
+      #
+      #   mkdir -p $(dirname $ARCHIVE)
+      #   time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} ${ARCHIVE}
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      continue-on-error: ${{ format('{0}', inputs.skip-if-does-not-exist) == 'true' }}
+      with:
+        name: ${{ inputs.name }}
+        path: /tmp/downloads
+
+    - name: Extract artifact
+      # actions/download-artifact has no SKIPPED output, so this step checks for the archive itself.
+      # if: ${{ steps.download-artifact.outputs.SKIPPED == 'false' }}
       shell: bash -euxo pipefail {0}
       env:
         TARGET: ${{ inputs.path }}
         ARCHIVE: /tmp/downloads/${{ inputs.name }}.tar.zst
         SKIP_IF_DOES_NOT_EXIST: ${{ inputs.skip-if-does-not-exist }}
-        PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}/{2}', github.event.pull_request.head.sha || github.sha, github.run_id, github.run_attempt) }}
+        NAME: ${{ inputs.name }}
+        PREFIX: ${{ inputs.prefix }}
       run: |
-        BUCKET=neon-github-public-dev
-        FILENAME=$(basename $ARCHIVE)
-
-        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX%$GITHUB_RUN_ATTEMPT} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
-        if [ -z "${S3_KEY}" ]; then
+        if [ ! -f ${ARCHIVE} ]; then
           if [ "${SKIP_IF_DOES_NOT_EXIST}" = "true" ]; then
-            echo 'SKIPPED=true' >> $GITHUB_OUTPUT
+            echo >&2 "Artifact ${NAME} (prefix '${PREFIX}') does not exist, skipping"
             exit 0
           else
-            echo >&2 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
+            echo >&2 "Artifact ${NAME} (prefix '${PREFIX}') does not exist"
             exit 1
           fi
         fi
 
-        echo 'SKIPPED=false' >> $GITHUB_OUTPUT
-
-        mkdir -p $(dirname $ARCHIVE)
-        time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} ${ARCHIVE}
-
-    - name: Extract artifact
-      if: ${{ steps.download-artifact.outputs.SKIPPED == 'false' }}
-      shell: bash -euxo pipefail {0}
-      env:
-        TARGET: ${{ inputs.path }}
-        ARCHIVE: /tmp/downloads/${{ inputs.name }}.tar.zst
-      run: |
         mkdir -p ${TARGET}
         time tar -xf ${ARCHIVE} -C ${TARGET}
         rm -f ${ARCHIVE}

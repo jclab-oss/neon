@@ -1289,8 +1289,13 @@ mod tests {
         let testdir = crate::config::PageServerConf::test_repo_dir("test_virtual_files");
         std::fs::create_dir_all(&testdir)?;
 
+        // One direct IO block: 512 bytes, or 4096 with the `io-align-4k` feature, whose direct IO
+        // validation rejects 512-byte buffers. The names below still say 512, as upstream's do.
+        const BLOCK_SIZE: usize = get_io_buffer_alignment();
+
         let zeropad512 = |content: &[u8]| {
-            let mut buf = IoBufferMut::with_capacity_zeroed(512);
+            // let mut buf = IoBufferMut::with_capacity_zeroed(512);
+            let mut buf = IoBufferMut::with_capacity_zeroed(BLOCK_SIZE);
             buf[..content.len()].copy_from_slice(content);
             buf.freeze().slice_len()
         };
@@ -1327,8 +1332,13 @@ mod tests {
         res?;
 
         let assert_first_512_eq = async |vfile: &VirtualFile, expect: &[u8]| {
+            // .read_exact_at(IoBufferMut::with_capacity_zeroed(512).slice_full(), 0, &ctx)
             let buf = vfile
-                .read_exact_at(IoBufferMut::with_capacity_zeroed(512).slice_full(), 0, &ctx)
+                .read_exact_at(
+                    IoBufferMut::with_capacity_zeroed(BLOCK_SIZE).slice_full(),
+                    0,
+                    &ctx,
+                )
                 .await
                 .unwrap();
             assert_eq!(&buf[..], &zeropad512(expect)[..]);

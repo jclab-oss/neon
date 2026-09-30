@@ -14,6 +14,9 @@ testing = []
 # 'rest_broker' feature is currently unused in the communicator, but we accept it for convenience of
 # calling build scripts, so that you can pass the same feature to all packages.
 rest_broker = []
+# 'io-align-4k' feature is unused in the communicator, but we accept it for convenience of calling
+# build scripts, so that you can pass the same feature to all packages.
+io-align-4k = []
 
 [dependencies]
 axum.workspace = true

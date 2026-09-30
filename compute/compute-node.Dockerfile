@@ -123,9 +123,20 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # By default, /bin/sh used in debian images will treat '\n' as eol,
 # but as we use bash as SHELL, and built-in echo in bash requires '-e' flag for that.
+#
+# Debian 11 (bullseye) LTS ended on 2026-08-31 and its security suite is gone from deb.debian.org
+# (every bullseye-security package 404s) without having reached archive.debian.org yet (no Release
+# file there), so take it from snapshot.debian.org as of shortly before the end of LTS - the same
+# kind of source the base image's own sources.list lists for its build date. Snapshot Release files
+# are past their Valid-Until date. bullseye and bullseye-updates are still served by
+# deb.debian.org. No-op on bookworm. Repeated in the pgbouncer and final stages.
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused = on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
-    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
+    echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc && \
+    if grep -q '^VERSION_CODENAME=bullseye$' /etc/os-release; then \
+        sed -i 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20260801T000000Z|' /etc/apt/sources.list && \
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/80-archive-valid-until; \
+    fi
 
 RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
@@ -455,7 +466,9 @@ RUN mkdir -p /h3/usr/ && \
 # not version-specific
 # last release v4.1.3 - Jul 26, 2023
 WORKDIR /ext-src
-RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.3.tar.gz -O h3-pg.tar.gz && \
+# zachasme/h3-pg moved to postgis/h3-pg and the old tarball URL now 404s (same content and sha256)
+# RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.3.tar.gz -O h3-pg.tar.gz && \
+RUN wget https://github.com/postgis/h3-pg/archive/refs/tags/v4.1.3.tar.gz -O h3-pg.tar.gz && \
     echo "5c17f09a820859ffe949f847bebf1be98511fb8f1bd86f94932512c00479e324 h3-pg.tar.gz" | sha256sum --check && \
     mkdir h3-pg-src && cd h3-pg-src && tar xzf ../h3-pg.tar.gz --strip-components=1 -C .
 
@@ -1750,8 +1763,13 @@ RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
 #########################################################################################
 
 FROM $BASE_IMAGE_SHA AS pgbouncer
+# bullseye-security from snapshot.debian.org, see the "build-deps" layer
 RUN set -e \
     && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
+    && if grep -q '^VERSION_CODENAME=bullseye$' /etc/os-release; then \
+        sed -i 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20260801T000000Z|' /etc/apt/sources.list \
+        && echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/80-archive-valid-until; \
+    fi \
     && apt update \
     && apt install --no-install-suggests --no-install-recommends -y \
         build-essential \
@@ -1939,8 +1957,15 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
 # libevent for pgbouncer
+#
+# bullseye-security from snapshot.debian.org, see the "build-deps" layer. This also stays in the
+# image, for anything built on top of it that installs packages (e.g. docker-compose/compute_wrapper).
 RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
-    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc
+    echo -e "retry_connrefused = on\ntimeout=15\ntries=5\n" > /root/.wgetrc && \
+    if grep -q '^VERSION_CODENAME=bullseye$' /etc/os-release; then \
+        sed -i 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20260801T000000Z|' /etc/apt/sources.list && \
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/80-archive-valid-until; \
+    fi
 RUN apt update && \
     case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):

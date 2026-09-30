@@ -17,7 +17,9 @@ permissions:
 
 jobs:
   check-codestyle-python:
-    runs-on: [ self-hosted, small ]
+    # Upstream's self-hosted runner labels; here runners come from the RUNNER_* repository variables (see .github/actionlint.yml)
+    # runs-on: [ self-hosted, small ]
+    runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
 
     permissions:
       packages: read
@@ -27,7 +29,13 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
+      # This fork's runners (GitHub-hosted and self-hosted alike) run as uid 1001 and own the workspace,
+      # /__w/_temp and /github/home, while the build-tools image runs as `nonroot` (uid 1000): run as 1001
+      # (non-root, as initdb requires) and borrow the host's passwd entry for it.
+      # options: --init
+      options: --init --user 1001:1001
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -38,13 +46,16 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Cache poetry deps
-        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        # Upstream caches in Neon's Hetzner S3 bucket (tespkg/actions-cache); this fork uses the GitHub Actions cache
+        # uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-          use-fallback: false
+          # Hetzner cache settings, not used by actions/cache
+          # endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
+          # bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
+          # accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
+          # secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          # use-fallback: false
           path: ~/.cache/pypoetry/virtualenvs
           key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 

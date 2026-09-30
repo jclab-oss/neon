@@ -292,6 +292,7 @@ def test_isolation(
 
 # Run extra Neon-specific pg_regress-based tests. The tests and their
 # schedule file are in the sql_regress/ directory.
+@pytest.mark.timeout(1500)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
 @pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_sql_regress(
