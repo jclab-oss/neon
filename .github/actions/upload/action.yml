@@ -12,9 +12,11 @@ inputs:
     default: false
     required: false
   prefix:
+    # description: "S3 prefix. Default is '${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
     description: "Unused: artifacts are stored as GitHub Actions artifacts of the current run, not under an S3 prefix"
     required: false
   aws-oidc-role-arn:
+    # description: "the OIDC role arn for aws auth"
     description: "the OIDC role arn for aws auth (unused: this fork has no access to AWS/S3)"
     required: false
     default: ""
@@ -61,6 +63,31 @@ runs:
     # artifact of the current run instead. It stays a single .tar.zst (rather than uploading the
     # directory) because upload-artifact does not preserve file modes, and the binaries need +x.
     # `overwrite` mirrors the S3 behaviour of the latest upload winning (e.g. on a re-run).
+    # - name: Configure AWS credentials
+    #   uses: aws-actions/configure-aws-credentials@v4
+    #   with:
+    #     aws-region: eu-central-1
+    #     role-to-assume: ${{ inputs.aws-oidc-role-arn }}
+    #     role-duration-seconds: 3600
+    #
+    # - name: Upload artifact
+    #   if: ${{ steps.prepare-artifact.outputs.SKIPPED == 'false' }}
+    #   shell: bash -euxo pipefail {0}
+    #   env:
+    #     SOURCE: ${{ inputs.path }}
+    #     ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+    #     PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}/{2}', github.event.pull_request.head.sha || github.sha, github.run_id , github.run_attempt) }}
+    #   run: |
+    #     BUCKET=neon-github-public-dev
+    #     FILENAME=$(basename $ARCHIVE)
+    #
+    #     FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
+    #
+    #     time aws s3 mv --only-show-errors ${ARCHIVE} s3://${BUCKET}/${PREFIX}/${FILENAME}
+    #
+    #     # Ref https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary
+    #     echo "[${FILENAME}](https://${BUCKET}.s3.amazonaws.com/${PREFIX}/${FILENAME}) ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}
+
     - name: Upload artifact
       if: ${{ steps.prepare-artifact.outputs.SKIPPED == 'false' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

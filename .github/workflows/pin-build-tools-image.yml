@@ -62,6 +62,9 @@ jobs:
           FROM_TAG: ${{ inputs.from-tag }}
           TO_TAG: pinned
         run: |
+          # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+          # docker manifest inspect "ghcr.io/neondatabase/build-tools:${FROM_TAG}" > "${FROM_TAG}.json"
+          # docker manifest inspect "ghcr.io/neondatabase/build-tools:${TO_TAG}"   > "${TO_TAG}.json"
           docker manifest inspect "${IMAGE_REPO}:${FROM_TAG}" > "${FROM_TAG}.json"
           # `pinned` does not exist before the first pin in this fork
           docker manifest inspect "${IMAGE_REPO}:${TO_TAG}"   > "${TO_TAG}.json" || true
@@ -81,10 +84,32 @@ jobs:
     if: needs.check-manifests.outputs.skip == 'false' || format('{0}', inputs.force) == 'true'
 
     permissions:
+      # No OIDC token needed: this fork has no access to AWS/Azure
+      # id-token: write  # Required for aws/azure login
       packages: write  # required for pushing to GHCR
 
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
+      # Only this repository owner's GHCR namespace: this fork has no access to Neon's Docker Hub, ECR or ACR
+      # image-map: |
+      #   {
+      #     "ghcr.io/neondatabase/build-tools:${{ inputs.from-tag }}-bullseye": [
+      #       "docker.io/neondatabase/build-tools:pinned-bullseye",
+      #       "ghcr.io/neondatabase/build-tools:pinned-bullseye",
+      #       "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bullseye",
+      #       "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bullseye"
+      #     ],
+      #     "ghcr.io/neondatabase/build-tools:${{ inputs.from-tag }}-bookworm": [
+      #       "docker.io/neondatabase/build-tools:pinned-bookworm",
+      #       "docker.io/neondatabase/build-tools:pinned",
+      #       "ghcr.io/neondatabase/build-tools:pinned-bookworm",
+      #       "ghcr.io/neondatabase/build-tools:pinned",
+      #       "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bookworm",
+      #       "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned",
+      #       "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bookworm",
+      #       "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned"
+      #     ]
+      #   }
       image-map: |
         {
           "ghcr.io/${{ github.repository_owner }}/build-tools:${{ inputs.from-tag }}-bullseye": [
@@ -95,4 +120,12 @@ jobs:
             "ghcr.io/${{ github.repository_owner }}/build-tools:pinned"
           ]
         }
+      # This fork has no access to AWS/Azure: images are only pushed to GHCR, not to ECR/ACR
+      # aws-region: ${{ vars.AWS_ECR_REGION }}
+      # aws-account-id: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      # aws-role-to-assume: "gha-oidc-neon-admin"
+      # azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
+      # azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+      # azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      # acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
     secrets: inherit

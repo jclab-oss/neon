@@ -19,6 +19,8 @@ on:
         value: ${{ jobs.check-image.outputs.tag }}
       image:
         description: "build-tools image"
+        # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+        # value: ghcr.io/neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
         value: ghcr.io/${{ github.repository_owner }}/build-tools:${{ jobs.check-image.outputs.tag }}
 
 defaults:
@@ -89,6 +91,8 @@ jobs:
                 contains(fromJSON(steps.set-variables.outputs.debians), 'bullseye') &&
                 contains(fromJSON(steps.set-variables.outputs.debians), 'bookworm') }}
         run: |
+          # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+          # if docker manifest inspect ghcr.io/neondatabase/build-tools:${IMAGE_TAG}; then
           if docker manifest inspect ghcr.io/${GITHUB_REPOSITORY_OWNER}/build-tools:${IMAGE_TAG}; then
             found=true
           else
@@ -112,6 +116,8 @@ jobs:
 
     # Upstream's self-hosted `large`/`large-arm64` runners, mapped to GitHub-hosted runners
     # (override with the RUNNER_LARGE/RUNNER_LARGE_ARM64 repository variables: a label, or a JSON array of labels).
+    # Upstream's self-hosted runner labels; here runners come from the RUNNER_* repository variables (see .github/actionlint.yml)
+    # runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
     runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
 
     steps:
@@ -122,15 +128,30 @@ jobs:
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # Only needed on Neon's shared self-hosted runners; the default Docker config directory is used here
+      # - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
         with:
           cache-binary: false
+
+      # No login to Neon's private registries (Docker Hub, cache.neon.build, ECR, ACR): this fork only pushes to GHCR
+      # - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+      #   with:
+      #     username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No login to Neon's private registries (Docker Hub, cache.neon.build, ECR, ACR): this fork only pushes to GHCR
+      # - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+      #   with:
+      #     registry: cache.neon.build
+      #     username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
+      #     password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
       - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
@@ -145,10 +166,14 @@ jobs:
             DEBIAN_VERSION=${{ matrix.debian }}
           # Upstream keeps its layer cache in the private cache.neon.build registry; keep it next to the image in GHCR instead.
           # PRs also keep a cache of their own (cache-pr<N>-*), read on top of main's and never written to main's.
+          # cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
+          # cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
           cache-from: |
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
             ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-pr{1}-{2}-{3}', github.repository_owner, github.event.pull_request.number, matrix.debian, matrix.arch) || '' }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-{1}-{2},mode=max', github.repository_owner, matrix.debian, matrix.arch) || github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-pr{1}-{2}-{3},mode=max', github.repository_owner, github.event.pull_request.number, matrix.debian, matrix.arch) || '' }}
+          # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+          # ghcr.io/neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 
@@ -165,6 +190,12 @@ jobs:
         with:
           egress-policy: audit
 
+      # No login to Neon's private registries (Docker Hub, cache.neon.build, ECR, ACR): this fork only pushes to GHCR
+      # - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+      #   with:
+      #     username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
@@ -180,13 +211,19 @@ jobs:
           IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |
           for debian in ${DEBIANS}; do
+            # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+            # tags=("-t" "ghcr.io/neondatabase/build-tools:${IMAGE_TAG}-${debian}")
             tags=("-t" "ghcr.io/${GITHUB_REPOSITORY_OWNER}/build-tools:${IMAGE_TAG}-${debian}")
 
             if [ "${EVERYTHING}" == "true" ] && [ "${debian}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
+              # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+              # tags+=("-t" "ghcr.io/neondatabase/build-tools:${IMAGE_TAG}")
               tags+=("-t" "ghcr.io/${GITHUB_REPOSITORY_OWNER}/build-tools:${IMAGE_TAG}")
             fi
 
             for arch in ${ARCHS}; do
+              # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+              # tags+=("ghcr.io/neondatabase/build-tools:${IMAGE_TAG}-${debian}-${arch}")
               tags+=("ghcr.io/${GITHUB_REPOSITORY_OWNER}/build-tools:${IMAGE_TAG}-${debian}-${arch}")
             done
 

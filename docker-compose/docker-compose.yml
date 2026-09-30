@@ -3,6 +3,7 @@ services:
     restart: always
     # MinIO no longer publishes its images (neither minio/* on Docker Hub nor quay.io/minio/*):
     # use Rancher's mirrors, a server and client release from the same day
+    # image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
     image: rancher/mirrored-minio-minio:RELEASE.2022-12-12T19-27-27Z
     ports:
       - 9000:9000
@@ -13,6 +14,8 @@ services:
     command: server /data --address :9000 --console-address ":9001"
 
   minio_create_buckets:
+    # Rancher's mirror, see above
+    # image: minio/mc
     image: rancher/mirrored-minio-mc:RELEASE.2022-12-13T00-23-28Z
     environment:
       - MINIO_ROOT_USER=minio

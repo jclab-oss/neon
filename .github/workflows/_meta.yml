@@ -153,6 +153,8 @@ jobs:
         # This fork has no `release-*` GitHub releases (yet), in which case previous-releases.jq fails
         # with "Found no release for storage, compute, proxy". Leave the outputs empty instead: the jobs
         # that consume them fall back to the current build-tag or skip the release-to-release checks.
+        # Upstream's pipeline ends with:
+        #   | tee -a "${GITHUB_OUTPUT}"
         run: |
           gh api --paginate \
             -H "Accept: application/vnd.github+json" \

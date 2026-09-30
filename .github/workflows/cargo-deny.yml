@@ -25,22 +25,21 @@ jobs:
             )
           }}
 
+    # Upstream's self-hosted runner labels; here runners come from the RUNNER_* repository variables (see .github/actionlint.yml)
+    # runs-on: [self-hosted, small]
     runs-on: ${{ startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04' }}
 
     permissions:
       packages: read
 
     container:
+      # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+      # image: ${{ inputs.build-tools-image || 'ghcr.io/neondatabase/build-tools:pinned' }}
       image: ${{ inputs.build-tools-image || format('ghcr.io/{0}/build-tools:pinned', github.repository_owner) }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # GitHub-hosted runners own the workspace, /__w/_temp and /github/home as uid 1001, while the
-      # build-tools image runs as `nonroot` (uid 1000), so run as 1001 (non-root, as initdb requires)
-      # and borrow the host's passwd entry for it.
-      options: --init --user 1001:1001
-      volumes:
-        - /etc/passwd:/etc/passwd:ro
+      options: --init
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
