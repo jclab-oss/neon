@@ -16,8 +16,10 @@ inputs:
     # description: "S3 prefix. Default is '${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
     description: >
       S3 prefix upstream uses to fetch artifacts of *other* runs (e.g. `latest` for the previous release).
-      Artifacts are GitHub Actions artifacts of the current run here, so when a prefix is given the artifact
-      is treated as missing (see `skip-if-does-not-exist`).
+      Without a prefix, the artifact is a GitHub Actions artifact of the current run. With one, it is the
+      OCI artifact tagged `<name>-<prefix>` in ghcr.io/<repository owner>/neon-compat-data, where
+      build_and_test.yml's `promote-compatibility-data` job pushes the release's artifacts (as `-latest`
+      and `-<release tag>`).
     required: false
   aws-oidc-role-arn:
     # Unused: this fork has no access to AWS/S3. Kept so that callers passing it stay valid
@@ -39,7 +41,7 @@ runs:
 
     - name: Download artifact
       id: download-artifact
-      # Artifacts of other runs (a non-empty prefix) aren't reachable, see the `prefix` input.
+      # Artifacts of other runs (a non-empty prefix) come from GHCR, see the steps below.
       if: inputs.prefix == ''
       # Upstream downloads from S3 with the script below; a missing artifact is handled in "Extract artifact".
       # shell: bash -euxo pipefail {0}
@@ -72,6 +74,29 @@ runs:
       with:
         name: ${{ inputs.name }}
         path: /tmp/downloads
+
+    - name: Set up ORAS
+      if: inputs.prefix != ''
+      uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+
+    - name: Download artifact from GHCR
+      # A missing artifact (e.g. before the first release) is handled in "Extract artifact".
+      if: inputs.prefix != ''
+      shell: bash -euxo pipefail {0}
+      env:
+        REPOSITORY: ghcr.io/${{ github.repository_owner }}/neon-compat-data
+        TAG: ${{ inputs.name }}-${{ inputs.prefix }}
+        ACTOR: ${{ github.actor }}
+        TOKEN: ${{ github.token }}
+      run: |
+        REPOSITORY=${REPOSITORY,,}
+        mkdir -p /tmp/downloads
+        # Logging in only matters if the package isn't public; pulling may still work without it.
+        echo "${TOKEN}" | oras login ghcr.io --username "${ACTOR}" --password-stdin || true
+        # The artifact holds a single `<name>.tar.zst`, which lands where "Extract artifact" expects it.
+        if ! time oras pull --output /tmp/downloads "${REPOSITORY}:${TAG}"; then
+          echo "::notice::${REPOSITORY}:${TAG} could not be pulled"
+        fi
 
     - name: Extract artifact
       # actions/download-artifact has no SKIPPED output, so this step checks for the archive itself.

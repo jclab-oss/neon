@@ -59,10 +59,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # A GitHub App's installation token when the NEON_BOT_CLIENT_ID and NEON_BOT_PRIVATE_KEY
+      # secrets are set, upstream's CI_ACCESS_TOKEN otherwise (see the action)
+      - name: Get CI access token
+        id: ci-access-token
+        uses: ./.github/actions/ci-access-token
+        with:
+          client-id: ${{ secrets.NEON_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.NEON_BOT_PRIVATE_KEY }}
+          fallback-token: ${{ secrets.CI_ACCESS_TOKEN }}
+
       - name: Create release PR
         uses: neondatabase/dev-actions/release-pr@290dec821d86fa8a93f019e8c69720f5865b5677
         with:
           component: ${{ inputs.component }}
           cherry-pick: ${{ inputs.cherry-pick }}
         env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          # GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ steps.ci-access-token.outputs.token }}
