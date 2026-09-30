@@ -1,0 +1,36 @@
+name: "CI access token"
+description: >
+  A token for what upstream does with the CI_ACCESS_TOKEN secret (a personal access token): creating and
+  fast-forwarding release PRs, whose events must trigger workflows, which GITHUB_TOKEN's don't.
+  With a GitHub App's client ID and private key, it is a short-lived installation token of that App;
+  without them, it is `fallback-token` (pass secrets.CI_ACCESS_TOKEN to keep upstream's behaviour).
+
+inputs:
+  client-id:
+    description: "The GitHub App's client ID (`Iv23li...`, not its numeric App ID). Empty to use `fallback-token`"
+    required: false
+    default: ''
+  private-key:
+    description: "The GitHub App's private key (PEM). Empty to use `fallback-token`"
+    required: false
+    default: ''
+  fallback-token:
+    description: "The token to use when no GitHub App is configured"
+    required: false
+    default: ''
+
+outputs:
+  token:
+    description: "The GitHub App installation token if an App is configured, `fallback-token` otherwise"
+    value: ${{ steps.app-token.outputs.token || inputs.fallback-token }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Create GitHub App installation token
+      id: app-token
+      if: inputs.client-id != '' && inputs.private-key != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        private-key: ${{ inputs.private-key }}

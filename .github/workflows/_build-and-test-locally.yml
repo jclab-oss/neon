@@ -393,6 +393,7 @@ jobs:
       # id-token: write # aws-actions/configure-aws-credentials
       contents: read
       statuses: write
+      packages: read # the previous release's compatibility data in GHCR, see the `download` action
     needs: [ build-neon ]
     # On this fork's x64 runners the debug build without LFC also has timing-sensitive failures
     # (e.g. test_slow_flush, test_cancellations), so don't let it fail the build either. This has to be
@@ -458,10 +459,11 @@ jobs:
                         ${{ inputs.test-selection != '' && format('-k "{0}"', inputs.test-selection) || '' }}
         env:
           # No TEST_RESULT_CONNSTR: this fork has no access to Neon's test results database.
-          # No CHECK_ONDISK_DATA_COMPATIBILITY: the backward/forward compatibility tests need the previous
-          # release's binaries and snapshot, which upstream keeps in Neon's S3 bucket.
+          # The previous release's binaries and snapshot that CHECK_ONDISK_DATA_COMPATIBILITY needs come from
+          # GHCR here (see build_and_test.yml's `promote-compatibility-data`); run-python-test-set unsets it
+          # when they are missing, e.g. before the first release.
           # TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
-          # CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
+          CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
