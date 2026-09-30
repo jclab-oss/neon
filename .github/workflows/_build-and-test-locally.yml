@@ -394,6 +394,11 @@ jobs:
       contents: read
       statuses: write
     needs: [ build-neon ]
+    # On this fork's x64 runners the debug build without LFC also has timing-sensitive failures
+    # (e.g. test_slow_flush, test_cancellations), so don't let it fail the build either. This has to be
+    # the job's continue-on-error: the step-level one below doesn't keep a failing composite action
+    # (run-python-test-set) from failing the job, while the job-level one makes `needs` report success.
+    continue-on-error: ${{ (matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug') || (matrix.lfc_state == 'without-lfc' && inputs.build-type == 'debug' && inputs.arch == 'x64') }}
     # Upstream's self-hosted runner labels; here runners come from the RUNNER_* repository variables (see .github/actionlint.yml)
     # runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large-metal')) }}
     runs-on: ${{ inputs.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE_METAL, '[') && fromJSON(vars.RUNNER_LARGE_METAL) || vars.RUNNER_LARGE_METAL || 'ubuntu-22.04') }}
@@ -421,12 +426,11 @@ jobs:
           submodules: true
 
       - name: Pytest regression tests
-        # On this fork's x64 runners the debug build without LFC also has timing-sensitive failures
-        # (e.g. test_slow_flush, test_pageserver_reconnect), so don't let it fail the build either.
-        # continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
-        continue-on-error: ${{ (matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug') || (matrix.lfc_state == 'without-lfc' && inputs.build-type == 'debug' && inputs.arch == 'x64') }}
+        continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: ${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 75 || 180 }}
+        # Debug runs on this fork's runners take ~2h50m, right at upstream's limits: allow 20 more minutes.
+        # timeout-minutes: ${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 75 || 180 }}
+        timeout-minutes: ${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 75 || 200 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
@@ -446,7 +450,10 @@ jobs:
           #
           # test_historic_storage_formats downloads its datasets from Neon's S3 bucket, which no longer
           # allows anonymous reads (403), so it cannot run here (reported as neondatabase/neon#12938).
-          extra_params: --session-timeout=${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
+          #
+          # Debug limits are raised by 20 minutes along with `timeout-minutes` above; upstream's:
+          #   --session-timeout=${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 3000 || 10200 }}
+          extra_params: --session-timeout=${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 3000 || 11400 }} --count=${{ inputs.test-run-count }}
                         --deselect test_runner/regress/test_compatibility.py::test_historic_storage_formats
                         ${{ inputs.test-selection != '' && format('-k "{0}"', inputs.test-selection) || '' }}
         env:
