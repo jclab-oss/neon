@@ -2019,9 +2019,9 @@ jobs:
             workdir=$(mktemp -d)
             # Each artifact holds a single `<name>.tar.zst` (see the `upload` action)
             if ! gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${name}" --dir "${workdir}"; then
-              # A missing snapshot only means no on-disk compatibility check for that build and Postgres version
-              # (run-python-test-set skips it); the Neon artifacts are required.
-              if [[ "${name}" == compatibility-snapshot-* ]]; then
+              # The x64 debug regress tests may fail, and then leave no snapshot: debug builds skip the checks
+              # that need it (see test_compatibility.py). Everything else is required.
+              if [[ "${name}" == compatibility-snapshot-*-debug-* ]]; then
                 echo "::warning::${name} is missing from run ${RUN_ID}, not promoting it"
                 rm -rf "${workdir}"
                 continue

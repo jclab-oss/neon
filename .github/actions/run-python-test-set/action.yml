@@ -144,6 +144,15 @@ runs:
           export COMPATIBILITY_NEON_BIN=/tmp/neon-previous/bin
           export COMPATIBILITY_POSTGRES_DISTRIB_DIR=/tmp/neon-previous/pg_install
         fi
+        # Likewise, only check the on-disk data compatibility with the previous release when both its
+        # binaries and its snapshot for this Postgres version were downloaded (there are none before the
+        # first release, or for a Postgres version the release didn't test). Debug builds check whatever
+        # part is there: their data may be incomplete (see test_compatibility.py).
+        if [ "${BUILD_TYPE}" != "debug" ] && [ -n "${CHECK_ONDISK_DATA_COMPATIBILITY:-}" ] \
+            && { [ ! -d /tmp/neon-previous/bin ] || [ ! -d "${COMPATIBILITY_SNAPSHOT_DIR}/repo" ]; }; then
+          echo "::notice::No compatibility data of a previous release for ${BUILD_TYPE} ${PG_VERSION}, not checking the on-disk data compatibility"
+          unset CHECK_ONDISK_DATA_COMPATIBILITY
+        fi
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
@@ -249,10 +258,10 @@ runs:
 
     - name: Upload compatibility snapshot
       # Note, that we use `github.base_ref` which is a target branch for a PR
-      # Also when some tests failed: the snapshot comes from test_create_snapshot alone, and this fork lets the
-      # x64 debug regress tests fail (see _build-and-test-locally.yml), which would leave the release without it.
+      # In debug builds, also when some tests failed: the snapshot comes from test_create_snapshot alone, and this
+      # fork lets the x64 debug regress tests fail (see _build-and-test-locally.yml).
       # if: github.event_name == 'pull_request' && github.base_ref == 'release'
-      if: ${{ !cancelled() && github.event_name == 'pull_request' && github.base_ref == 'release' }}
+      if: ${{ (success() || (!cancelled() && inputs.build_type == 'debug')) && github.event_name == 'pull_request' && github.base_ref == 'release' }}
       uses: ./.github/actions/upload
       with:
         name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
