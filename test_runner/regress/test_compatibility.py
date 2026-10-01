@@ -137,6 +137,18 @@ skip_old_debug_versions = pytest.mark.skipif(
 )
 
 
+def skip_without_compatibility_snapshot(compatibility_snapshot_dir: Path):
+    """
+    Skip, rather than fail, when the previous release's snapshot isn't there. This fork's release may provide only
+    part of its compatibility data (e.g. no snapshot from a build whose tests failed), and the checks that need
+    only the rest (e.g. test_forward_compatibility, with the previous binaries) still run.
+    """
+    if not (compatibility_snapshot_dir / "repo").exists():
+        pytest.skip(
+            f"no compatibility snapshot of the previous release at {compatibility_snapshot_dir}"
+        )
+
+
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
 def test_create_snapshot(
@@ -220,6 +232,7 @@ def test_backward_compatibility(
     """
     Test that the new binaries can read old data
     """
+    skip_without_compatibility_snapshot(compatibility_snapshot_dir)
     log.info(f"Using snapshot dir at {compatibility_snapshot_dir}")
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
@@ -259,12 +272,21 @@ def test_forward_compatibility(
     # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
     # But always use the current version's neon_local binary.
     # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
-    assert neon_env_builder.compatibility_neon_binpath is not None, (
-        "the environment variable COMPATIBILITY_NEON_BIN is required"
-    )
-    assert neon_env_builder.compatibility_pg_distrib_dir is not None, (
-        "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required"
-    )
+    # Skip, rather than fail, without the previous release's binaries: this fork's release may provide only part of
+    # its compatibility data (see skip_without_compatibility_snapshot).
+    # assert neon_env_builder.compatibility_neon_binpath is not None, (
+    #     "the environment variable COMPATIBILITY_NEON_BIN is required"
+    # )
+    # assert neon_env_builder.compatibility_pg_distrib_dir is not None, (
+    #     "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required"
+    # )
+    if (
+        neon_env_builder.compatibility_neon_binpath is None
+        or neon_env_builder.compatibility_pg_distrib_dir is None
+    ):
+        pytest.skip(
+            "the environment variables COMPATIBILITY_NEON_BIN and COMPATIBILITY_POSTGRES_DISTRIB_DIR are required"
+        )
     neon_env_builder.neon_binpath = neon_env_builder.compatibility_neon_binpath
     neon_env_builder.pg_distrib_dir = neon_env_builder.compatibility_pg_distrib_dir
 
@@ -653,6 +675,7 @@ def test_versions_mismatch(
     """
     Checks compatibility of different combinations of versions of the components
     """
+    skip_without_compatibility_snapshot(compatibility_snapshot_dir)
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
 
     neon_env_builder.num_safekeepers = 3

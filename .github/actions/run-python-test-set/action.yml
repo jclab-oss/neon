@@ -144,14 +144,6 @@ runs:
           export COMPATIBILITY_NEON_BIN=/tmp/neon-previous/bin
           export COMPATIBILITY_POSTGRES_DISTRIB_DIR=/tmp/neon-previous/pg_install
         fi
-        # Likewise, only check the on-disk data compatibility with the previous release when both its
-        # binaries and its snapshot for this Postgres version were downloaded (there are none before the
-        # first release, or for a Postgres version the release didn't test).
-        if [ -n "${CHECK_ONDISK_DATA_COMPATIBILITY:-}" ] \
-            && { [ ! -d /tmp/neon-previous/bin ] || [ ! -d "${COMPATIBILITY_SNAPSHOT_DIR}/repo" ]; }; then
-          echo "::notice::No compatibility data of a previous release for ${BUILD_TYPE} ${PG_VERSION}, not checking the on-disk data compatibility"
-          unset CHECK_ONDISK_DATA_COMPATIBILITY
-        fi
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
