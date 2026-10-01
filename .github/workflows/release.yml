@@ -69,11 +69,56 @@ jobs:
           private-key: ${{ secrets.NEON_BOT_PRIVATE_KEY }}
           fallback-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
+      # Upstream's action opens the PR with `gh pr create`, which in a fork also queries the parent repository
+      # (neondatabase/neon) and fails there on neondatabase's IP allow list. The step below does what the
+      # action's `neon-release-pr new` does, but opens the PR with the REST API, which doesn't.
+      # - name: Create release PR
+      #   uses: neondatabase/dev-actions/release-pr@290dec821d86fa8a93f019e8c69720f5865b5677
+      #   with:
+      #     component: ${{ inputs.component }}
+      #     cherry-pick: ${{ inputs.cherry-pick }}
+      #   env:
+      #     GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       - name: Create release PR
-        uses: neondatabase/dev-actions/release-pr@290dec821d86fa8a93f019e8c69720f5865b5677
-        with:
-          component: ${{ inputs.component }}
-          cherry-pick: ${{ inputs.cherry-pick }}
         env:
-          # GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
           GH_TOKEN: ${{ steps.ci-access-token.outputs.token }}
+          COMPONENT: ${{ inputs.component }}
+          CHERRY_PICK: ${{ inputs.cherry-pick }}
+        run: |
+          if [ "${COMPONENT}" = storage ]; then
+            release_branch=release
+          else
+            release_branch="release-${COMPONENT}"
+          fi
+          now=$(date -u +%s)
+          rc_branch="rc/release-${COMPONENT}/$(date -u -d "@${now}" +%Y-%m-%dT%H-%MZ)"
+          title="${COMPONENT^} release $(date -u -d "@${now}" '+%Y-%m-%d %H:%M UTC')"
+          read -ra commits <<< "${CHERRY_PICK}"
+          # With cherry-picks, it is a hotfix on top of the previous release, otherwise a release of main
+          if [ ${#commits[@]} -gt 0 ]; then
+            base="${release_branch}"
+          else
+            base=main
+          fi
+          echo "RC branch ${rc_branch} from ${base}, for ${release_branch}"
+
+          git fetch --all
+          git switch -c "${rc_branch}" "origin/${base}"
+          verified_commits=()
+          for commit in "${commits[@]}"; do
+            verified_commits+=("$(git rev-parse --verify "${commit}^{commit}")")
+          done
+          for commit in "${verified_commits[@]}"; do
+            git cherry-pick "${commit}"
+          done
+          # A merge of the release branch that keeps this branch's tree, so that the PR fast-forwards it
+          merge_commit=$(git commit-tree "HEAD^{tree}" -p HEAD -p "origin/${release_branch}" -m "${title}")
+          git merge --ff-only "${merge_commit}"
+          git push -u origin "${rc_branch}"
+
+          pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f head="${rc_branch}" -f base="${release_branch}" -f title="${title}" -f body="" --jq .number)
+          if [ ${#commits[@]} -gt 0 ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${pr}/labels" -f 'labels[]=release/hotfix' > /dev/null
+          fi
+          echo "Created ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${pr}" | tee -a "${GITHUB_STEP_SUMMARY}"

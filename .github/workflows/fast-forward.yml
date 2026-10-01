@@ -18,28 +18,39 @@ jobs:
         with:
           egress-policy: audit
 
-      # Only for the ci-access-token action below, taken from the base branch rather than from the PR
+      # Only for the ci-access-token action below, taken from the base branch rather than from the PR. Into a
+      # directory that is removed right after, without credentials: sequoia-pgp/fast-forward pushes from a
+      # repository in the working directory if there is one (with its credentials), else from a fresh clone
+      # with the token it is given.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           sparse-checkout: .github/actions/ci-access-token
+          path: ci-access-token
+          persist-credentials: false
 
       # A GitHub App's installation token when the NEON_BOT_CLIENT_ID and NEON_BOT_PRIVATE_KEY
       # secrets are set, upstream's CI_ACCESS_TOKEN otherwise (see the action)
       - name: Get CI access token
         id: ci-access-token
-        uses: ./.github/actions/ci-access-token
+        uses: ./ci-access-token/.github/actions/ci-access-token
         with:
           client-id: ${{ secrets.NEON_BOT_CLIENT_ID }}
           private-key: ${{ secrets.NEON_BOT_PRIVATE_KEY }}
           fallback-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
+      - name: Clean up the working directory
+        run: rm -rf ci-access-token
+
+      # `gh pr edit` and `gh pr comment` (below) query the fork's parent repository (neondatabase/neon) too, which
+      # fails on neondatabase's IP allow list: use the REST API instead.
       - name: Remove fast-forward label to PR
         env:
           # GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
           GH_TOKEN: ${{ steps.ci-access-token.outputs.token }}
         run: |
-          gh pr edit ${{ github.event.pull_request.number }} --repo "${GITHUB_REPOSITORY}" --remove-label "fast-forward"
+          # gh pr edit ${{ github.event.pull_request.number }} --repo "${GITHUB_REPOSITORY}" --remove-label "fast-forward"
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.pull_request.number }}/labels/fast-forward" > /dev/null
 
       - name: Fast forwarding
         uses: sequoia-pgp/fast-forward@ea7628bedcb0b0b96e94383ada458d812fca4979
@@ -57,6 +68,8 @@ jobs:
           # GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
           GH_TOKEN: ${{ steps.ci-access-token.outputs.token }}
         run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --repo "${GITHUB_REPOSITORY}" \
-            --body "Not trying to forward pull-request, because \`mergeable_state\` is \`${{ github.event.pull_request.mergeable_state }}\`, not \`clean\` or \`unstable\`."
+          # gh pr comment ${{ github.event.pull_request.number }} \
+          #   --repo "${GITHUB_REPOSITORY}" \
+          #   --body "Not trying to forward pull-request, because \`mergeable_state\` is \`${{ github.event.pull_request.mergeable_state }}\`, not \`clean\` or \`unstable\`."
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.pull_request.number }}/comments" \
+            -f body="Not trying to forward pull-request, because \`mergeable_state\` is \`${{ github.event.pull_request.mergeable_state }}\`, not \`clean\` or \`unstable\`." > /dev/null
