@@ -1,0 +1,160 @@
+name: Generate compatibility snapshots
+
+# This branch is an upstream Neon release (see UPSTREAM_* below) with this workflow in place of upstream's ones.
+# It creates that release's compatibility snapshots (`test_compatibility.py::test_create_snapshot`) as
+# `compatibility-snapshot-<X64|ARM64>-release-pg<v16|v17>` artifacts, in the format Build and Test's `upload` action
+# gives them (a single `.tar.zst` of the snapshot directory), plus an `upstream-info` artifact (`info.yaml`) naming
+# the exact images used. They are meant for jclab-oss/neon-information (`testing/archive/upstream/<release>/`).
+#
+# Nothing is built here: the binaries come from the images upstream published for the release, which are built
+# without the `testing` feature (see test_create_snapshot).
+
+on:
+  push:
+    branches:
+      - test-generator/**
+  workflow_dispatch:
+
+env:
+  # The upstream release this branch is
+  UPSTREAM_RELEASE: release-9129
+  UPSTREAM_COMMIT: 5340423416b46c85841904f42c93be9af145c643
+  NEON_IMAGE: ghcr.io/neondatabase/neon:release-9129
+  # compute_ctl, which `neon_local endpoint start` runs, is only in the compute images. Compute is released
+  # separately: this is upstream's last compute release before the storage release above.
+  COMPUTE_IMAGE_PREFIX: ghcr.io/neondatabase/compute-node-
+  COMPUTE_IMAGE_TAG: release-compute-9073
+  BUILD_TOOLS_IMAGE: ghcr.io/neondatabase/build-tools:pinned-bookworm
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+jobs:
+  info:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Describe the images
+        run: |
+          digest() {
+            echo "$1@$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$1" | tr -d '"')"
+          }
+          mkdir -p /tmp/info
+          cat > /tmp/info/info.yaml <<EOF
+          # The upstream Neon release the compatibility snapshots next to this file were generated from, by the
+          # \`test-generator/upstream\` branch of ${GITHUB_REPOSITORY}. The images are the release's binaries.
+          release: ${UPSTREAM_RELEASE}
+          commit: ${UPSTREAM_COMMIT}
+          neon-image: $(digest "${NEON_IMAGE}")
+          compute-images:
+            v16: $(digest "${COMPUTE_IMAGE_PREFIX}v16:${COMPUTE_IMAGE_TAG}")
+            v17: $(digest "${COMPUTE_IMAGE_PREFIX}v17:${COMPUTE_IMAGE_TAG}")
+          build-tools-image: $(digest "${BUILD_TOOLS_IMAGE}")
+          generator:
+            commit: ${GITHUB_SHA}
+            run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          cat /tmp/info/info.yaml
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upstream-info
+          path: /tmp/info/info.yaml
+          if-no-files-found: error
+
+  generate:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x64, arm64 ]
+        pg-version: [ v16, v17 ]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      PG_VERSION: ${{ matrix.pg-version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Extract the binaries from the images
+        run: |
+          mkdir -p /tmp/neon/bin /tmp/neon/pg_install
+
+          docker pull --quiet "${NEON_IMAGE}"
+          id=$(docker create "${NEON_IMAGE}")
+          for bin in neon_local pageserver pagectl safekeeper storage_broker storage_controller storage_scrubber endpoint_storage; do
+            docker cp "${id}:/usr/local/bin/${bin}" /tmp/neon/bin/
+          done
+          for v in v14 v15 v16 v17; do
+            docker cp "${id}:/usr/local/${v}" "/tmp/neon/pg_install/${v}"
+          done
+          docker rm "${id}"
+
+          COMPUTE_IMAGE="${COMPUTE_IMAGE_PREFIX}${PG_VERSION}:${COMPUTE_IMAGE_TAG}"
+          docker pull --quiet "${COMPUTE_IMAGE}"
+          id=$(docker create "${COMPUTE_IMAGE}")
+          docker cp "${id}:/usr/local/bin/compute_ctl" /tmp/neon/bin/
+          docker rm "${id}"
+
+          /tmp/neon/bin/pageserver --version
+
+      - name: Create the compatibility snapshot
+        env:
+          NAME: compatibility-snapshot-${{ runner.arch }}-release-pg${{ matrix.pg-version }}
+        run: |
+          # The build-tools image runs as `nonroot` (uid 1000)
+          mkdir -p /tmp/test_output /tmp/snapshot
+          chmod -R a+rwX "${GITHUB_WORKSPACE}" /tmp/test_output /tmp/snapshot
+
+          docker pull --quiet "${BUILD_TOOLS_IMAGE}"
+          # Host networking: compute_ctl listens on `[::]`, which needs IPv6
+          docker run --rm --network host \
+            --volume "${GITHUB_WORKSPACE}:/src" --workdir /src \
+            --volume /tmp/neon:/tmp/neon:ro \
+            --volume /tmp/test_output:/tmp/test_output \
+            --volume /tmp/snapshot:/tmp/snapshot \
+            --env CI=true \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env NEON_BIN=/tmp/neon/bin \
+            --env POSTGRES_DISTRIB_DIR=/tmp/neon/pg_install \
+            --env TEST_OUTPUT=/tmp/test_output \
+            --env BUILD_TYPE=release \
+            --env DEFAULT_PG_VERSION="${PG_VERSION#v}" \
+            --env NAME \
+            "${BUILD_TOOLS_IMAGE}" \
+            bash -euxo pipefail -c '
+              ./scripts/pysync
+              ./scripts/pytest test_runner/regress/test_compatibility.py -k test_create_snapshot \
+                -p no:cacheprovider --tb=short --verbose -rA
+              # Directory is created by test_compatibility.py::test_create_snapshot
+              tar -C "/tmp/test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}" -cf "/tmp/snapshot/${NAME}.tar.zst" --zstd .
+            '
+          ls -l /tmp/snapshot
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compatibility-snapshot-${{ runner.arch }}-release-pg${{ matrix.pg-version }}
+          path: /tmp/snapshot/compatibility-snapshot-${{ runner.arch }}-release-pg${{ matrix.pg-version }}.tar.zst
+          if-no-files-found: error
+          # Already compressed
+          compression-level: 0
+
+      - name: Make the test output readable
+        if: failure()
+        run: docker run --rm --user root --volume /tmp/test_output:/tmp/test_output "${BUILD_TOOLS_IMAGE}" chmod -R a+rX /tmp/test_output
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: test-output-${{ runner.arch }}-pg${{ matrix.pg-version }}
+          path: /tmp/test_output
+          retention-days: 7

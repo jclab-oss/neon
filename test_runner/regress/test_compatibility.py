@@ -177,9 +177,16 @@ def test_create_snapshot(
     pageserver_http = env.pageserver.http_client()
 
     flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
-    pageserver_http.timeline_checkpoint(
-        tenant_id, timeline_id, wait_until_uploaded=True, force_image_layer_creation=True
-    )
+    # This fork generates the snapshot with the binaries of upstream's published release images, which are built
+    # without the `testing` feature and so have no checkpoint API: the graceful pageserver stop below flushes the
+    # in-memory layers instead (without the forced image layers).
+    # pageserver_http.timeline_checkpoint(
+    #     tenant_id, timeline_id, wait_until_uploaded=True, force_image_layer_creation=True
+    # )
+    if '"testing"' in env.pageserver.version:
+        pageserver_http.timeline_checkpoint(
+            tenant_id, timeline_id, wait_until_uploaded=True, force_image_layer_creation=True
+        )
 
     env.endpoints.stop_all()
     for sk in env.safekeepers:
