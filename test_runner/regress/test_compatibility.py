@@ -137,6 +137,19 @@ skip_old_debug_versions = pytest.mark.skipif(
 )
 
 
+# This fork lets its x64 debug regress tests fail, so a release may lack part of the debug compatibility data
+# (e.g. the snapshot, uploaded after the tests): in debug builds, each check skips itself when the part it needs
+# is missing, and the others still run. Release builds need all of it, as upstream.
+SKIP_WITHOUT_COMPATIBILITY_DATA = os.getenv("BUILD_TYPE", "debug") == "debug"
+
+
+def skip_without_compatibility_snapshot(compatibility_snapshot_dir: Path):
+    if SKIP_WITHOUT_COMPATIBILITY_DATA and not (compatibility_snapshot_dir / "repo").exists():
+        pytest.skip(
+            f"no compatibility snapshot of the previous release at {compatibility_snapshot_dir}"
+        )
+
+
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
 def test_create_snapshot(
@@ -220,6 +233,7 @@ def test_backward_compatibility(
     """
     Test that the new binaries can read old data
     """
+    skip_without_compatibility_snapshot(compatibility_snapshot_dir)
     log.info(f"Using snapshot dir at {compatibility_snapshot_dir}")
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
@@ -259,6 +273,12 @@ def test_forward_compatibility(
     # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
     # But always use the current version's neon_local binary.
     # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
+    # See SKIP_WITHOUT_COMPATIBILITY_DATA
+    if SKIP_WITHOUT_COMPATIBILITY_DATA and (
+        neon_env_builder.compatibility_neon_binpath is None
+        or neon_env_builder.compatibility_pg_distrib_dir is None
+    ):
+        pytest.skip("no binaries of the previous release")
     assert neon_env_builder.compatibility_neon_binpath is not None, (
         "the environment variable COMPATIBILITY_NEON_BIN is required"
     )
@@ -653,6 +673,7 @@ def test_versions_mismatch(
     """
     Checks compatibility of different combinations of versions of the components
     """
+    skip_without_compatibility_snapshot(compatibility_snapshot_dir)
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
 
     neon_env_builder.num_safekeepers = 3

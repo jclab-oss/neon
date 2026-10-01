@@ -461,7 +461,8 @@ jobs:
           # No TEST_RESULT_CONNSTR: this fork has no access to Neon's test results database.
           # The previous release's binaries and snapshot that CHECK_ONDISK_DATA_COMPATIBILITY needs come from
           # GHCR here (see build_and_test.yml's `promote-compatibility-data`); run-python-test-set unsets it
-          # when they are missing, e.g. before the first release.
+          # when they are missing (e.g. before the first release), except in debug builds, where each test skips
+          # itself for the part it lacks (see test_compatibility.py).
           # TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
