@@ -2018,7 +2018,16 @@ jobs:
           for name in "${artifacts[@]}"; do
             workdir=$(mktemp -d)
             # Each artifact holds a single `<name>.tar.zst` (see the `upload` action)
-            gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${name}" --dir "${workdir}"
+            if ! gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${name}" --dir "${workdir}"; then
+              # A missing snapshot only means no on-disk compatibility check for that build and Postgres version
+              # (run-python-test-set skips it); the Neon artifacts are required.
+              if [[ "${name}" == compatibility-snapshot-* ]]; then
+                echo "::warning::${name} is missing from run ${RUN_ID}, not promoting it"
+                rm -rf "${workdir}"
+                continue
+              fi
+              exit 1
+            fi
 
             if [[ "${name}" == neon-Linux-* ]]; then
               # The compatibility tests only use the previous release's bin/ and pg_install/: drop the rest,

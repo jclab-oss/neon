@@ -257,7 +257,10 @@ runs:
 
     - name: Upload compatibility snapshot
       # Note, that we use `github.base_ref` which is a target branch for a PR
-      if: github.event_name == 'pull_request' && github.base_ref == 'release'
+      # Also when some tests failed: the snapshot comes from test_create_snapshot alone, and this fork lets the
+      # x64 debug regress tests fail (see _build-and-test-locally.yml), which would leave the release without it.
+      # if: github.event_name == 'pull_request' && github.base_ref == 'release'
+      if: ${{ !cancelled() && github.event_name == 'pull_request' && github.base_ref == 'release' }}
       uses: ./.github/actions/upload
       with:
         name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
