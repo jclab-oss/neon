@@ -33,7 +33,7 @@ use tracing::*;
 use utils::lsn::Lsn;
 
 use crate::context::RequestContext;
-use crate::pgdatadir_mapping::Version;
+use crate::pgdatadir_mapping::{NextMultiXactOffset, Version};
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{GetVectoredError, VersionedKeySpaceQuery};
 use crate::tenant::{PageReconstructError, Timeline};
@@ -236,23 +236,28 @@ where
     buf: Vec<u8>,
     current_segment: Option<(SlruKind, u32)>,
     total_blocks: usize,
+    next_multixact_offset: Option<NextMultiXactOffset>,
 }
 
 impl<'a, 'b, W> SlruSegmentsBuilder<'a, 'b, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    fn new(ar: &'a mut Builder<&'b mut W>) -> Self {
+    fn new(
+        ar: &'a mut Builder<&'b mut W>,
+        next_multixact_offset: Option<NextMultiXactOffset>,
+    ) -> Self {
         Self {
             ar,
             buf: Vec::new(),
             current_segment: None,
             total_blocks: 0,
+            next_multixact_offset,
         }
     }
 
     async fn add_block(&mut self, key: &Key, block: Bytes) -> Result<(), BasebackupError> {
-        let (kind, segno, _) = key.to_slru_block()?;
+        let (kind, segno, blknum) = key.to_slru_block()?;
 
         match kind {
             SlruKind::Clog => {
@@ -292,6 +297,11 @@ where
                 self.buf
                     .extend_from_slice(block.slice(..BLCKSZ as usize).as_ref());
             }
+        }
+
+        if let Some(fixup) = &self.next_multixact_offset {
+            let start = self.buf.len() - BLCKSZ as usize;
+            fixup.apply(kind, segno, blknum, &mut self.buf[start..]);
         }
 
         Ok(())
@@ -403,7 +413,10 @@ where
                     BLCKSZ as u64,
                 );
 
-            let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
+            let next_multixact_offset =
+                NextMultiXactOffset::from_checkpoint(pgversion, &checkpoint_bytes)
+                    .context("failed to decode checkpoint")?;
+            let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar, next_multixact_offset);
 
             for part in slru_partitions.parts {
                 let query = VersionedKeySpaceQuery::uniform(part, self.lsn);
