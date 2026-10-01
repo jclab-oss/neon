@@ -49,6 +49,7 @@
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
 #include "catalog/pg_class.h"
+#include "common/file_utils.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/interrupt.h"
@@ -56,6 +57,7 @@
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
+#include "storage/fd.h"
 #include "storage/fsm_internals.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
@@ -2127,8 +2129,13 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 #define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
 
+/*
+ * Read the contents of an SLRU segment from the pageserver into 'buffer'.
+ * Returns the number of blocks read (0 if the pageserver doesn't have the
+ * segment), or -1 if 'path' is not an SLRU that the pageserver stores.
+ */
 static int
-neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buffer)
+neon_read_slru_segment(const char *path, int segno, void *buffer)
 {
 	XLogRecPtr	request_lsn,
 				not_modified_since;
@@ -2181,6 +2188,73 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 
 	return n_blocks;
 }
+
+#if PG_MAJORVERSION_NUM < 17
+static int
+neon_smgr_read_slru_segment(SMgrRelation reln, const char *path, int segno, void *buffer)
+{
+	return neon_read_slru_segment(path, segno, buffer);
+}
+#else
+/*
+ * read_slru_segment_hook: download an SLRU segment that's missing locally.
+ *
+ * In REL_17_STABLE_neon and later, the hook is responsible for writing the
+ * segment file to 'path'. Returns false if the pageserver doesn't have the
+ * segment; the caller then treats the file as nonexistent.
+ */
+bool
+neon_download_slru_segment(const char *path, int segno)
+{
+	char	   *buffer;
+	int			n_blocks;
+	int			fd;
+	struct iovec iov;
+
+	buffer = palloc(BLCKSZ * SLRU_PAGES_PER_SEGMENT);
+	n_blocks = neon_read_slru_segment(path, segno, buffer);
+	if (n_blocks <= 0)
+	{
+		pfree(buffer);
+		return false;
+	}
+
+	/* The caller only calls us if the file doesn't exist */
+	fd = OpenTransientFile(path, O_WRONLY | O_EXCL | O_CREAT | PG_BINARY);
+	if (fd < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not create file \"%s\": %m", path)));
+
+	errno = 0;
+	iov.iov_base = buffer;
+	iov.iov_len = n_blocks * BLCKSZ;
+	pgstat_report_wait_start(WAIT_EVENT_SLRU_WRITE);
+	if (pg_pwritev_with_retry(fd, &iov, 1, 0) != n_blocks * BLCKSZ)
+	{
+		int			save_errno = errno;
+
+		pgstat_report_wait_end();
+		CloseTransientFile(fd);
+		/* don't leave a partial segment behind */
+		unlink(path);
+		/* if write didn't set errno, assume problem is no disk space */
+		errno = save_errno ? save_errno : ENOSPC;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write file \"%s\": %m", path)));
+	}
+	pgstat_report_wait_end();
+
+	if (CloseTransientFile(fd) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not close file \"%s\": %m", path)));
+
+	pfree(buffer);
+	return true;
+}
+#endif
 
 static void
 AtEOXact_neon(XactEvent event, void *arg)
@@ -2251,7 +2325,9 @@ static const struct f_smgr neon_smgr =
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
 	.smgr_end_unlogged_build = neon_end_unlogged_build,
 
-	.smgr_read_slru_segment = neon_read_slru_segment,
+#if PG_MAJORVERSION_NUM < 17
+	.smgr_read_slru_segment = neon_smgr_read_slru_segment,
+#endif
 };
 
 const f_smgr *

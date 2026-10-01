@@ -1246,9 +1246,9 @@ index e8c668e0a1..03be5c2120 100644
  SET SESSION ROLE regress_schemauser1;
  CREATE SCHEMA testns;
  SELECT nspname, rolname FROM pg_namespace, pg_roles WHERE pg_namespace.nspname = 'testns' AND pg_namespace.nspowner = pg_roles.oid;
-@@ -2799,7 +2803,7 @@ DROP USER regress_priv_user7;
- DROP USER regress_priv_user8; -- does not exist
- ERROR:  role "regress_priv_user8" does not exist
+@@ -2831,7 +2835,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE pg_signal_backend
+ ALTER DEFAULT PRIVILEGES FOR ROLE pg_read_all_settings
+ 	REVOKE USAGE ON TYPES FROM pg_read_all_settings;
  -- permissions with LOCK TABLE
 -CREATE USER regress_locktable_user;
 +CREATE USER regress_locktable_user PASSWORD NEON_PASSWORD_PLACEHOLDER;

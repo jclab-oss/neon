@@ -248,6 +248,9 @@ extern shardno_t get_shard_number(BufferTag* tag);
 
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
+#if PG_MAJORVERSION_NUM >= 17
+extern bool neon_download_slru_segment(const char *path, int segno);
+#endif
 extern void readahead_buffer_resize(int newsize, void *extra);
 
 
