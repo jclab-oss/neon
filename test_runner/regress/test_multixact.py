@@ -1,7 +1,14 @@
 from __future__ import annotations
 
-from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
-from fixtures.utils import query_scalar
+import pytest
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, check_restored_datadir_content
+from fixtures.pg_version import PgVersion
+from fixtures.utils import query_scalar, skip_on_postgres
+
+# See src/include/access/multixact.h and slru.h
+MULTIXACT_OFFSETS_PER_PAGE = 8192 // 4
+SLRU_PAGES_PER_SEGMENT = 32
 
 
 #
@@ -86,3 +93,81 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
 
     # Check that we can restore the content of the datadir correctly
     check_restored_datadir_content(test_output_dir, env, endpoint)
+
+
+#
+# Since PostgreSQL 17.7, RecordNewMultiXact() also sets the offset of the next
+# multixid, and GetMultiXactIdMembers() errors out if that offset is still zero
+# ("MultiXact %u has invalid next offset"). The pageserver only stores each
+# multixid's own offset, and fills in the next one's from the checkpoint when it
+# serves the page. Check that a compute started from the pageserver sees that
+# entry, both in the basebackup and when the segment is downloaded on demand, and
+# when the next multixid is the first one on a new page.
+#
+@skip_on_postgres(PgVersion.V14, "the next multixid's offset is only set since 17.7")
+@skip_on_postgres(PgVersion.V15, "the next multixid's offset is only set since 17.7")
+@skip_on_postgres(PgVersion.V16, "the next multixid's offset is only set since 17.7")
+@pytest.mark.parametrize("lazy_slru_download", [False, True])
+@pytest.mark.parametrize("page_boundary", [False, True])
+def test_multixact_next_offset(
+    neon_env_builder: NeonEnvBuilder, lazy_slru_download: bool, page_boundary: bool
+):
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={"lazy_slru_download": lazy_slru_download}
+    )
+    endpoint = env.endpoints.create_start("main")
+
+    endpoint.safe_psql("CREATE TABLE t(i int primary key)")
+    endpoint.safe_psql("INSERT INTO t VALUES (1)")
+
+    cur = endpoint.connect().cursor()
+    conn1 = endpoint.connect(autocommit=False)
+    conn2 = endpoint.connect(autocommit=False)
+
+    def create_multixact() -> int:
+        # Two transactions locking the same row make its xmax a new multixid
+        conn1.cursor().execute("SELECT * FROM t FOR KEY SHARE")
+        conn2.cursor().execute("SELECT * FROM t FOR KEY SHARE")
+        mxid = int(query_scalar(cur, "SELECT xmax::text::bigint FROM t"))
+        conn1.commit()
+        conn2.commit()
+        return mxid
+
+    mxid = create_multixact()
+    if page_boundary:
+        # Create multixids until the next one is the first on a new page
+        while (mxid + 1) % MULTIXACT_OFFSETS_PER_PAGE != 0:
+            mxid = create_multixact()
+    else:
+        for _ in range(10):
+            mxid = create_multixact()
+    next_mxid = mxid + 1
+    log.info(f"last multixid {mxid}, next multixid {next_mxid}")
+
+    conn1.close()
+    conn2.close()
+
+    # Restart, so that the multixact offsets pages come from the pageserver
+    endpoint.stop()
+    endpoint.start()
+    cur = endpoint.connect().cursor()
+
+    cur.execute("SELECT next_multixact_id, next_multi_offset FROM pg_control_checkpoint()")
+    row = cur.fetchone()
+    assert row is not None
+    assert int(row[0]) == next_mxid
+    next_offset = int(row[1])
+    assert next_offset > 0
+
+    # Read the last multixid's members. That also downloads the segment, with
+    # lazy_slru_download.
+    assert query_scalar(cur, f"SELECT count(*) FROM pg_get_multixact_members('{mxid}')") == 2
+
+    # The next multixid's entry must be set, to where the last multixid's members end
+    segno = next_mxid // (MULTIXACT_OFFSETS_PER_PAGE * SLRU_PAGES_PER_SEGMENT)
+    entry = next_mxid % (MULTIXACT_OFFSETS_PER_PAGE * SLRU_PAGES_PER_SEGMENT)
+    raw = query_scalar(
+        cur,
+        f"SELECT pg_read_binary_file('pg_multixact/offsets/{segno:04X}', {entry * 4}, 4)",
+    )
+    assert int.from_bytes(bytes(raw), "little") == next_offset

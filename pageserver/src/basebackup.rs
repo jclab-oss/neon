@@ -431,6 +431,36 @@ where
                 }
             }
             slru_builder.finish().await?;
+        } else if self.timeline.tenant_shard_id.is_shard_zero() {
+            // The compute downloads the SLRU segments it doesn't have when it reads
+            // them. But if it writes a page of such a segment first, e.g. when it
+            // zeroes the next page at startup (TrimMultiXact() since 17.7) or extends
+            // the SLRU to a new page, it creates the segment file with just that page,
+            // and the segment's other pages are never downloaded and read as zeros.
+            // So include the segments that the next XID, multixid and multixact
+            // member go to.
+            let segments = current_slru_segments(pgversion, &checkpoint_bytes)
+                .context("failed to decode checkpoint")?;
+            for (kind, segno) in segments {
+                if !self
+                    .timeline
+                    .get_slru_segment_exists(kind, segno, Version::at(self.lsn), self.ctx)
+                    .await?
+                {
+                    continue;
+                }
+                let segment = self
+                    .timeline
+                    .get_slru_segment(kind, segno, self.lsn, self.ctx)
+                    .await?;
+                let segname = format!("{kind}/{segno:>04X}");
+                let header = new_tar_header(&segname, segment.len() as u64)?;
+                self.ar
+                    .append(&header, segment.as_ref())
+                    .await
+                    .map_err(|e| BasebackupError::Client(e, "send_tarball,current_slru_segment"))?;
+                debug!("Added current SLRU segment {segname} to basebackup");
+            }
         }
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
@@ -876,4 +906,35 @@ fn new_tar_header_dir(path: &str) -> anyhow::Result<Header> {
     );
     header.set_cksum();
     Ok(header)
+}
+
+/// The SLRU segments that the next XID, multixid and multixact member go to,
+/// i.e. the segments that the compute writes to first.
+fn current_slru_segments(
+    pg_version: PgMajorVersion,
+    checkpoint: &[u8],
+) -> anyhow::Result<[(SlruKind, u32); 3]> {
+    let (next_xid, next_multi, next_multi_offset) = dispatch_pgversion!(pg_version, {
+        let checkpoint = pgv::CheckPoint::decode(checkpoint)?;
+        (
+            checkpoint.nextXid.value as u32,
+            checkpoint.nextMulti,
+            checkpoint.nextMultiOffset,
+        )
+    });
+    let segno = |pageno: u32| pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+    Ok([
+        (
+            SlruKind::Clog,
+            segno(next_xid / pg_constants::CLOG_XACTS_PER_PAGE),
+        ),
+        (
+            SlruKind::MultiXactOffsets,
+            segno(next_multi / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32),
+        ),
+        (
+            SlruKind::MultiXactMembers,
+            segno(next_multi_offset / pg_constants::MULTIXACT_MEMBERS_PER_PAGE as u32),
+        ),
+    ])
 }
