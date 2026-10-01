@@ -4,13 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       component:
-        description: "Component to release"
+        # description: "Component to release"
+        description: "Component to release (`all`: storage, proxy and compute in one release PR)"
         required: true
         type: choice
         options:
           - compute
           - proxy
           - storage
+          - all
+        default: all
       cherry-pick:
         description: "Commits to cherry-pick (space separated, makes this a hotfix based on previous release)"
         required: false
@@ -20,8 +23,11 @@ on:
   workflow_call:
     inputs:
       component:
-        description: "Component to release"
-        required: true
+        # description: "Component to release"
+        # required: true
+        description: "Component to release (`all` or empty: storage, proxy and compute in one release PR)"
+        required: false
+        default: ''
         type: string
       cherry-pick:
         description: "Commits to cherry-pick (space separated, makes this a hotfix based on previous release)"
@@ -85,7 +91,11 @@ jobs:
           COMPONENT: ${{ inputs.component }}
           CHERRY_PICK: ${{ inputs.cherry-pick }}
         run: |
-          if [ "${COMPONENT}" = storage ]; then
+          # `all` releases storage, proxy and compute together: its PR targets `release` like a storage release, and
+          # its merge commit also merges `release-proxy` and `release-compute` (see below), which fast-forward.yml
+          # then fast-forwards as well, so that one RC run releases all three.
+          COMPONENT="${COMPONENT:-all}"
+          if [ "${COMPONENT}" = storage ] || [ "${COMPONENT}" = all ]; then
             release_branch=release
           else
             release_branch="release-${COMPONENT}"
@@ -112,7 +122,18 @@ jobs:
             git cherry-pick "${commit}"
           done
           # A merge of the release branch that keeps this branch's tree, so that the PR fast-forwards it
-          merge_commit=$(git commit-tree "HEAD^{tree}" -p HEAD -p "origin/${release_branch}" -m "${title}")
+          parents=(-p HEAD -p "origin/${release_branch}")
+          if [ "${COMPONENT}" = all ]; then
+            # ... and of the proxy and compute release branches that exist and aren't merged already
+            for branch in release-proxy release-compute; do
+              if git rev-parse -q --verify "origin/${branch}" > /dev/null \
+                  && ! git merge-base --is-ancestor "origin/${branch}" HEAD \
+                  && ! git merge-base --is-ancestor "origin/${branch}" "origin/${release_branch}"; then
+                parents+=(-p "origin/${branch}")
+              fi
+            done
+          fi
+          merge_commit=$(git commit-tree "HEAD^{tree}" "${parents[@]}" -m "${title}")
           git merge --ff-only "${merge_commit}"
           git push -u origin "${rc_branch}"
 

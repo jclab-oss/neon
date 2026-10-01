@@ -906,9 +906,10 @@ jobs:
     # Also needs the Postgres versions selected by the `pg-versions` job
     # needs: [ check-permissions, meta ]
     needs: [ check-permissions, meta, pg-versions ]
-    # Also for manual runs (run-kind `workflow-dispatch`)
+    # Also for manual runs (run-kind `workflow-dispatch`), and for release PRs of all components
+    # (`rc/release-all/*`, see release.yml), which release compute too
     # if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')) }}
     permissions:
       # No OIDC token needed: this fork has no access to AWS/Azure
       # id-token: write # aws-actions/configure-aws-credentials
@@ -1039,9 +1040,10 @@ jobs:
     # Also needs the Postgres versions selected by the `pg-versions` job
     # needs: [ compute-node-image-arch, meta ]
     needs: [ compute-node-image-arch, meta, pg-versions ]
-    # Also for manual runs (run-kind `workflow-dispatch`)
+    # Also for manual runs (run-kind `workflow-dispatch`), and for release PRs of all components
+    # (`rc/release-all/*`, see release.yml), which release compute too
     # if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')) }}
     permissions:
       # No OIDC token needed: this fork has no access to AWS/Azure
       # id-token: write # aws-actions/configure-aws-credentials
@@ -1107,9 +1109,10 @@ jobs:
     # Also needs the Postgres versions selected by the `pg-versions` job
     # needs: [ check-permissions, meta, compute-node-image ]
     needs: [ check-permissions, meta, pg-versions, compute-node-image ]
-    # Also for manual runs (run-kind `workflow-dispatch`)
+    # Also for manual runs (run-kind `workflow-dispatch`), and for release PRs of all components
+    # (`rc/release-all/*`, see release.yml), which release compute too
     # if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')) }}
     # Upstream's self-hosted runner labels; here runners come from the RUNNER_* repository variables (see .github/actionlint.yml)
     # runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
     runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
@@ -1185,9 +1188,10 @@ jobs:
     # Also needs the Postgres versions selected by the `pg-versions` job
     # needs: [ vm-compute-node-image-arch, meta ]
     needs: [ vm-compute-node-image-arch, meta, pg-versions ]
-    # Also for manual runs (run-kind `workflow-dispatch`)
+    # Also for manual runs (run-kind `workflow-dispatch`), and for release PRs of all components
+    # (`rc/release-all/*`, see release.yml), which release compute too
     # if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')) }}
     permissions:
       packages: write
     runs-on: ubuntu-22.04
