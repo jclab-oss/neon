@@ -28,6 +28,14 @@ case "$RELEASE_BRANCH" in
     ;;
 esac
 
+# This fork's release of all components (rc/release-all/*, see .github/workflows/release.yml) targets `release`,
+# and its merge commit ("All release ...") also merges release-proxy and release-compute.
+ALL_RELEASE=false
+if [[ "$(git branch --show-current)" == rc/release-all/* ]]; then
+  ALL_RELEASE=true
+  COMPONENT="All"
+fi
+
 
 # Identify main and release branches
 MAIN_BRANCH="origin/main"
@@ -52,7 +60,11 @@ echo "✅ Merge commit message is correctly formatted: '${MERGE_COMMIT_MESSAGE}'
 
 LAST_COMMIT_PARENTS=$(git cat-file -p "${LAST_COMMIT}" | jq -sR '[capture("parent (?<parent>[0-9a-f]{40})"; "g") | .parent]')
 
-if [[ "$(echo "${LAST_COMMIT_PARENTS}" | jq 'length')" -ne 2 ]]; then
+if [[ "${ALL_RELEASE}" == true ]]; then
+  if [[ "$(echo "${LAST_COMMIT_PARENTS}" | jq 'length')" -lt 2 ]]; then
+    report_error "Last commit must be a merge commit with at least two parents"
+  fi
+elif [[ "$(echo "${LAST_COMMIT_PARENTS}" | jq 'length')" -ne 2 ]]; then
   report_error "Last commit must be a merge commit with exactly two parents"
 fi
 
