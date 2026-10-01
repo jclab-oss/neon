@@ -444,6 +444,10 @@ def dump_differs(
                 "diff",
                 "--unified",  # Make diff output more readable
                 "--ignore-matching-lines=^--",  # Ignore changes in comments
+                # Since 17.6 (CVE-2025-8714), pg_dump(all) brackets its output with `\restrict <key>` and
+                # `\unrestrict <key>`, with a random key for each dump (and older versions don't write them)
+                r"--ignore-matching-lines=^\\restrict ",
+                r"--ignore-matching-lines=^\\unrestrict ",
                 "--ignore-blank-lines",
                 str(first),
                 str(second),
