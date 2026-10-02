@@ -1,0 +1,155 @@
+name: "Docker cache registry"
+description: >
+  Picks the registry for BuildKit's layer cache (and for images nothing outside the run uses) and logs in
+  to it. With `cache-registry` set (the DOCKER_CACHE_REGISTRY repository variable, e.g.
+  `asia-northeast3-docker.pkg.dev/my-project/ci-cache`), that is a Google Artifact Registry repository the
+  self-hosted runners reach with their GCE VM's service account, next to the runners, so the cache never
+  leaves the cloud the runners run in; otherwise it is GHCR, next to the images, as before.
+
+inputs:
+  cache-registry:
+    description: "The DOCKER_CACHE_REGISTRY repository variable: `<host>/<path>` of the cache registry, or empty for GHCR"
+    required: false
+    default: ""
+  image:
+    description: "Image name the cache is kept for (e.g. `neon`); without it, only logs in and sets `registry`"
+    required: false
+    default: ""
+  flavor:
+    description: "Suffix of the cache tags, e.g. `bookworm-x64`: `cache-<flavor>` for main, `cache-pr<N>-<flavor>` for PR <N>"
+    required: false
+    default: ""
+
+outputs:
+  registry:
+    description: "The registry the cache (and run-local images) go to: `cache-registry`, or `ghcr.io/<repository owner>`"
+    value: ${{ steps.refs.outputs.registry }}
+  cache-from:
+    description: "`cache-from` for docker/build-push-action: main's cache, and on PRs the PR's own cache as well"
+    value: ${{ steps.refs.outputs.cache-from }}
+  cache-to:
+    description: "`cache-to` for docker/build-push-action: main's cache on `main`, the PR's own cache on PRs, empty otherwise"
+    value: ${{ steps.refs.outputs.cache-to }}
+
+runs:
+  using: "composite"
+  steps:
+    # A static `docker login` with an access token would not do: the token expires after an hour, and a
+    # compute-node image build without cache takes up to ~4 hours before it exports the cache. A credential
+    # helper is asked for credentials whenever the registry needs them (by docker and by buildx alike), and
+    # this one fetches a fresh token from the metadata server every time.
+    - name: Log in to the cache registry with the runner VM's service account
+      if: inputs.cache-registry != ''
+      shell: bash -euo pipefail {0}
+      env:
+        CACHE_REGISTRY: ${{ inputs.cache-registry }}
+      run: |
+        host="${CACHE_REGISTRY%%/*}"
+        helper_dir="${RUNNER_TEMP}/docker-credential-gce-metadata"
+        mkdir -p "${helper_dir}"
+        cat > "${helper_dir}/docker-credential-gce-metadata" <<'EOF'
+        #!/usr/bin/env bash
+        # Docker credential helper (https://github.com/docker/docker-credential-helpers protocol) handing out
+        # an access token of the GCE VM's service account, fetched from the metadata server on every call.
+        set -euo pipefail
+        case "${1:-}" in
+          get)
+            cat > /dev/null # the server URL; the same token is good for any Artifact Registry host
+            token=$(curl -sSf --retry 3 -H 'Metadata-Flavor: Google' \
+                      'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+                    | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+            printf '{"ServerURL":"","Username":"oauth2accesstoken","Secret":"%s"}\n' "${token}"
+            ;;
+          store|erase)
+            cat > /dev/null
+            ;;
+          list)
+            echo '{}'
+            ;;
+          *)
+            echo "docker-credential-gce-metadata: unknown command '${1:-}'" >&2
+            exit 1
+            ;;
+        esac
+        EOF
+        chmod +x "${helper_dir}/docker-credential-gce-metadata"
+        echo "${helper_dir}" >> "${GITHUB_PATH}"
+
+        # Fail here, not hours later when the cache is exported, if the runner is not a GCE VM with a service account
+        if ! echo "${host}" | "${helper_dir}/docker-credential-gce-metadata" get > /dev/null; then
+          echo >&2 "Cannot get a service account token from the GCE metadata server for ${host}:" \
+                   "DOCKER_CACHE_REGISTRY needs the self-hosted runners to be GCE VMs with a service account" \
+                   "that can write to ${CACHE_REGISTRY}"
+          exit 1
+        fi
+
+        config="${DOCKER_CONFIG:-${HOME}/.docker}/config.json"
+        python3 - "${config}" "${host}" <<'EOF'
+        import json
+        import os
+        import sys
+
+        path, host = sys.argv[1:]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path) as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            config = {}
+        config.setdefault("credHelpers", {})[host] = "gce-metadata"
+        with open(path, "w") as f:
+            json.dump(config, f, indent=2)
+        EOF
+
+    - name: Pick the cache refs
+      id: refs
+      shell: bash -euo pipefail {0}
+      env:
+        CACHE_REGISTRY: ${{ inputs.cache-registry }}
+        GHCR_REGISTRY: ghcr.io/${{ github.repository_owner }}
+        IMAGE: ${{ inputs.image }}
+        FLAVOR: ${{ inputs.flavor }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REF_NAME: ${{ github.ref_name }}
+      run: |
+        registry="${CACHE_REGISTRY:-${GHCR_REGISTRY}}"
+        registry="${registry%/}"
+        echo "registry=${registry}" | tee -a "${GITHUB_OUTPUT}"
+
+        if [ -z "${IMAGE}" ]; then
+          exit 0
+        fi
+
+        # GHCR keeps the options it has always used; for the cache registry, ask for the plain OCI image
+        # manifest format explicitly instead of relying on BuildKit's default
+        options=""
+        if [ -n "${CACHE_REGISTRY}" ]; then
+          options=",image-manifest=true,oci-mediatypes=true"
+        fi
+
+        main_ref="${registry}/${IMAGE}:cache-${FLAVOR}"
+        pr_ref=""
+        if [ -n "${PR_NUMBER}" ]; then
+          pr_ref="${registry}/${IMAGE}:cache-pr${PR_NUMBER}-${FLAVOR}"
+        fi
+
+        # Read main's cache, and on PRs the PR's own as well. main's cache is only written from `main`, so a
+        # PR can't affect it; PRs write a cache of their own instead. Other runs don't write any.
+        cache_from="type=registry,ref=${main_ref}"
+        if [ -n "${pr_ref}" ]; then
+          cache_from+=$'\n'"type=registry,ref=${pr_ref}"
+        fi
+        if [ "${REF_NAME}" == "main" ]; then
+          cache_to="type=registry,ref=${main_ref},mode=max${options}"
+        elif [ -n "${pr_ref}" ]; then
+          cache_to="type=registry,ref=${pr_ref},mode=max${options}"
+        else
+          cache_to=""
+        fi
+
+        {
+          echo "cache-from<<CACHE_FROM_EOF"
+          echo "${cache_from}"
+          echo "CACHE_FROM_EOF"
+          echo "cache-to=${cache_to}"
+        } | tee -a "${GITHUB_OUTPUT}"
