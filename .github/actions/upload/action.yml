@@ -39,7 +39,10 @@ runs:
           exit 1
         fi
 
-        ZSTD_NBTHREADS=0
+        # Upstream's plain assignment never reached the `zstd` that tar runs, which then compressed with one worker;
+        # exported, 0 makes it use all physical cores. The output is the same, byte for byte.
+        # ZSTD_NBTHREADS=0
+        export ZSTD_NBTHREADS=0
         if [ -d  ${SOURCE} ]; then
           time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
         elif [ -f ${SOURCE} ]; then

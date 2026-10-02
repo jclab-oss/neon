@@ -24,6 +24,11 @@ config-variables:
   - BENCHMARK_PROJECT_ID_SUB
   - DEV_AWS_OIDC_ROLE_ARN
   - DEV_AWS_OIDC_ROLE_MANAGE_BENCHMARK_EC2_VMS_ARN
+  # Registry for BuildKit's layer cache, and for the VM compute images of PR runs, instead of GHCR, e.g.
+  # `asia-northeast3-docker.pkg.dev/<project>/<repository>`: a Google Artifact Registry repository in the self-hosted
+  # runners' region, which they log in to with their GCE VM's service account (see the docker-cache-registry action).
+  # GHCR when unset.
+  - DOCKER_CACHE_REGISTRY
   - HETZNER_CACHE_BUCKET
   - HETZNER_CACHE_ENDPOINT
   - HETZNER_CACHE_REGION

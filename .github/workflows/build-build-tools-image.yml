@@ -153,6 +153,15 @@ jobs:
       #     username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
       #     password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
+      # The layer cache goes to the DOCKER_CACHE_REGISTRY repository variable's registry if set, else to GHCR
+      - name: Pick the layer cache
+        id: cache
+        uses: ./.github/actions/docker-cache-registry
+        with:
+          cache-registry: ${{ vars.DOCKER_CACHE_REGISTRY }}
+          image: build-tools
+          flavor: ${{ matrix.debian }}-${{ matrix.arch }}
+
       - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           file: build-tools/Dockerfile
@@ -164,14 +173,13 @@ jobs:
           pull: true
           build-args: |
             DEBIAN_VERSION=${{ matrix.debian }}
-          # Upstream keeps its layer cache in the private cache.neon.build registry; keep it next to the image in GHCR instead.
+          # Upstream keeps its layer cache in the private cache.neon.build registry; keep it in DOCKER_CACHE_REGISTRY
+          # (or next to the image in GHCR) instead, see the docker-cache-registry action.
           # PRs also keep a cache of their own (cache-pr<N>-*), read on top of main's and never written to main's.
           # cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
           # cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
-            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-pr{1}-{2}-{3}', github.repository_owner, github.event.pull_request.number, matrix.debian, matrix.arch) || '' }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-{1}-{2},mode=max', github.repository_owner, matrix.debian, matrix.arch) || github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/build-tools:cache-pr{1}-{2}-{3},mode=max', github.repository_owner, github.event.pull_request.number, matrix.debian, matrix.arch) || '' }}
+          cache-from: ${{ steps.cache.outputs.cache-from }}
+          cache-to: ${{ steps.cache.outputs.cache-to }}
           # Images live in this repository owner's GHCR namespace instead of `neondatabase`
           # ghcr.io/neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
           tags: |

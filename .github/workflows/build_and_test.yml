@@ -830,6 +830,15 @@ jobs:
       #     username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
       #     password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
+      # The layer cache goes to the DOCKER_CACHE_REGISTRY repository variable's registry if set, else to GHCR
+      - name: Pick the layer cache
+        id: cache
+        uses: ./.github/actions/docker-cache-registry
+        with:
+          cache-registry: ${{ vars.DOCKER_CACHE_REGISTRY }}
+          image: neon
+          flavor: bookworm-${{ matrix.arch }}
+
       - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           context: .
@@ -852,14 +861,13 @@ jobs:
           push: true
           pull: true
           file: Dockerfile
-          # Upstream keeps its layer cache in the private cache.neon.build registry; keep it next to the image in GHCR instead.
+          # Upstream keeps its layer cache in the private cache.neon.build registry; keep it in DOCKER_CACHE_REGISTRY
+          # (or next to the image in GHCR) instead, see the docker-cache-registry action.
           # PRs also keep a cache of their own (cache-pr<N>-*), read on top of main's and never written to main's.
           # cache-from: type=registry,ref=cache.neon.build/neon:cache-bookworm-${{ matrix.arch }}
           # cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bookworm', matrix.arch) || '' }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/neon:cache-bookworm-${{ matrix.arch }}
-            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/neon:cache-pr{1}-{2}-{3}', github.repository_owner, github.event.pull_request.number, 'bookworm', matrix.arch) || '' }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/neon:cache-{1}-{2},mode=max', github.repository_owner, 'bookworm', matrix.arch) || github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/neon:cache-pr{1}-{2}-{3},mode=max', github.repository_owner, github.event.pull_request.number, 'bookworm', matrix.arch) || '' }}
+          cache-from: ${{ steps.cache.outputs.cache-from }}
+          cache-to: ${{ steps.cache.outputs.cache-to }}
           # Images live in this repository owner's GHCR namespace instead of `neondatabase`
           # ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-${{ matrix.arch }}
           tags: |
@@ -981,6 +989,15 @@ jobs:
       #     username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
       #     password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
+      # The layer cache goes to the DOCKER_CACHE_REGISTRY repository variable's registry if set, else to GHCR
+      - name: Pick the layer cache
+        id: cache
+        uses: ./.github/actions/docker-cache-registry
+        with:
+          cache-registry: ${{ vars.DOCKER_CACHE_REGISTRY }}
+          image: compute-node-${{ matrix.version.pg }}
+          flavor: ${{ matrix.version.debian }}-${{ matrix.arch }}
+
       - name: Build compute-node image
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
@@ -996,14 +1013,13 @@ jobs:
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
-          # Upstream keeps its layer cache in the private cache.neon.build registry; keep it next to the image in GHCR instead.
+          # Upstream keeps its layer cache in the private cache.neon.build registry; keep it in DOCKER_CACHE_REGISTRY
+          # (or next to the image in GHCR) instead, see the docker-cache-registry action.
           # PRs also keep a cache of their own (cache-pr<N>-*), read on top of main's and never written to main's.
           # cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           # cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-pr{2}-{3}-{4}', github.repository_owner, matrix.version.pg, github.event.pull_request.number, matrix.version.debian, matrix.arch) || '' }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-{2}-{3},mode=max', github.repository_owner, matrix.version.pg, matrix.version.debian, matrix.arch) || github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-pr{2}-{3}-{4},mode=max', github.repository_owner, matrix.version.pg, github.event.pull_request.number, matrix.version.debian, matrix.arch) || '' }}
+          cache-from: ${{ steps.cache.outputs.cache-from }}
+          cache-to: ${{ steps.cache.outputs.cache-to }}
           # Images live in this repository owner's GHCR namespace instead of `neondatabase`
           # ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
@@ -1026,11 +1042,9 @@ jobs:
           pull: true
           file: compute/compute-node.Dockerfile
           target: extension-tests
-          # The layer cache is in GHCR instead of cache.neon.build, see above
+          # The layer cache is in DOCKER_CACHE_REGISTRY or GHCR instead of cache.neon.build, see above
           # cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
-            ${{ github.event.pull_request.number && format('type=registry,ref=ghcr.io/{0}/compute-node-{1}:cache-pr{2}-{3}-{4}', github.repository_owner, matrix.version.pg, github.event.pull_request.number, matrix.version.debian, matrix.arch) || '' }}
+          cache-from: ${{ steps.cache.outputs.cache-from }}
           # Images live in this repository owner's GHCR namespace instead of `neondatabase`
           # ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
@@ -1158,6 +1172,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Nothing outside a PR run uses its VM images: push-compute-image-dev has no tag to add for a PR. So on PRs,
+      # with the DOCKER_CACHE_REGISTRY repository variable set, they go to that registry, next to the runners, instead
+      # of GHCR (and vm-compute-node-image skips the multi-arch image). Runs whose images get tagged and released
+      # (main, release PRs, manual runs) keep pushing them to GHCR.
+      - name: Pick the registry for the VM image
+        id: vm-registry
+        uses: ./.github/actions/docker-cache-registry
+        with:
+          cache-registry: ${{ needs.meta.outputs.run-kind == 'pr' && vars.DOCKER_CACHE_REGISTRY || '' }}
+
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
@@ -1175,14 +1199,14 @@ jobs:
             -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-            -dst=ghcr.io/${{ github.repository_owner }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
+            -dst=${{ steps.vm-registry.outputs.registry }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
             -target-arch=linux/${{ matrix.arch }}
 
       - name: Pushing vm-compute-node image
         run: |
-          # Images live in this repository owner's GHCR namespace instead of `neondatabase`
+          # Images live in this repository owner's GHCR namespace (or DOCKER_CACHE_REGISTRY, see above) instead of `neondatabase`
           # docker push ghcr.io/neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
-          docker push ghcr.io/${{ github.repository_owner }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
+          docker push ${{ steps.vm-registry.outputs.registry }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
 
   vm-compute-node-image:
     # Also needs the Postgres versions selected by the `pg-versions` job
@@ -1191,7 +1215,13 @@ jobs:
     # Also for manual runs (run-kind `workflow-dispatch`), and for release PRs of all components
     # (`rc/release-all/*`, see release.yml), which release compute too
     # if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')) }}
+    # Not for PRs whose VM images went to DOCKER_CACHE_REGISTRY (see vm-compute-node-image-arch): nothing uses a PR's
+    # multi-arch VM image, and this GitHub-hosted job can't log in there.
+    if: >-
+      ${{
+        (contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')))
+        && !(needs.meta.outputs.run-kind == 'pr' && vars.DOCKER_CACHE_REGISTRY != '')
+      }}
     permissions:
       packages: write
     runs-on: ubuntu-22.04

@@ -80,7 +80,10 @@ runs:
         # ARCHIVE="${UNIQUE_KEY}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
         ARCHIVE_NAME="${UNIQUE_KEY}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)"
         ARCHIVE="/tmp/allure-results-${ARCHIVE_NAME}.tar.zst"
-        ZSTD_NBTHREADS=0
+        # Upstream's plain assignment never reached the `zstd` that tar runs, which then compressed with one worker;
+        # exported, 0 makes it use all physical cores. The output is the same, byte for byte.
+        # ZSTD_NBTHREADS=0
+        export ZSTD_NBTHREADS=0
 
         time tar -C ${REPORT_DIR} -cf ${ARCHIVE} --zstd .
         # time aws s3 mv --only-show-errors ${ARCHIVE} "s3://${BUCKET}/${RAW_PREFIX}/${ARCHIVE}"
