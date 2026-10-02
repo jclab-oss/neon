@@ -62,6 +62,7 @@ macro_rules! for_all_postgres_versions {
         $macro!(v15);
         $macro!(v16);
         $macro!(v17);
+        $macro!(v18);
     };
 }
 
@@ -97,6 +98,7 @@ macro_rules! dispatch_pgversion {
                 $crate::PgMajorVersion::PG15 => v15,
                 $crate::PgMajorVersion::PG16 => v16,
                 $crate::PgMajorVersion::PG17 => v17,
+                $crate::PgMajorVersion::PG18 => v18,
             ]
         )
     };
@@ -129,6 +131,7 @@ macro_rules! enum_pgversion_dispatch {
                 V15 : v15,
                 V16 : v16,
                 V17 : v17,
+                V18 : v18,
             ]
         )
     };
@@ -159,6 +162,7 @@ macro_rules! enum_pgversion {
                 V15 : v15,
                 V16 : v16,
                 V17 : v17,
+                V18 : v18,
             ]
         }
     };
@@ -172,6 +176,7 @@ macro_rules! enum_pgversion {
                 V15 : v15,
                 V16 : v16,
                 V17 : v17,
+                V18 : v18,
             ]
         }
     };
@@ -226,8 +231,8 @@ pub mod walrecord;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::{
-    BlockNumber, CheckPoint, ControlFileData, MultiXactId, OffsetNumber, Oid, PageHeaderData,
-    RepOriginId, TimeLineID, TransactionId, XLogRecPtr, XLogRecord, XLogSegNo, uint32, uint64,
+    BlockNumber, CheckPoint, MultiXactId, OffsetNumber, Oid, PageHeaderData, RepOriginId,
+    TimeLineID, TransactionId, XLogRecPtr, XLogRecord, XLogSegNo, uint32, uint64,
 };
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
@@ -245,11 +250,60 @@ pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 // Export some version independent functions that are used outside of this mod
-pub use v14::bindings::DBState_DB_SHUTDOWNED;
+pub use v14::bindings::{DBState, DBState_DB_SHUTDOWNED};
 pub use v14::xlog_utils::{
     XLogFileName, encode_logical_message, get_current_timestamp, to_pg_timestamp,
     try_from_pg_timestamp,
 };
+
+/// Determine which major version's ControlFileData layout a pg_control file uses.
+///
+/// The layout of ControlFileData is not the same in all versions (e.g. PostgreSQL 18
+/// added default_char_signedness before the CRC), so it has to be decoded with the
+/// bindings of the right version. pg_control_version tells which one that is; v14-v16
+/// share the same layout.
+pub fn pg_control_layout_version(buf: &[u8]) -> anyhow::Result<PgMajorVersion> {
+    // system_identifier (u64) is followed by pg_control_version (u32)
+    let Some(bytes) = buf.get(8..12) else {
+        anyhow::bail!("control file is too short");
+    };
+    let pg_control_version = u32::from_le_bytes(bytes.try_into().unwrap());
+    Ok(match pg_control_version {
+        1300 => PgMajorVersion::PG14,
+        1700 => PgMajorVersion::PG17,
+        1800 => PgMajorVersion::PG18,
+        v => anyhow::bail!("unsupported pg_control version {v}"),
+    })
+}
+
+/// The version-independent contents of a pg_control file that we need.
+#[derive(Debug, Clone)]
+pub struct PgControlData {
+    pub catalog_version_no: u32,
+    pub state: DBState,
+    /// LSN of the last checkpoint record
+    pub checkpoint: XLogRecPtr,
+    /// checkPointCopy, encoded as that version's CheckPoint struct
+    pub checkpoint_copy: Bytes,
+    pub checkpoint_redo: XLogRecPtr,
+}
+
+impl PgControlData {
+    /// Decode a pg_control file, using the bindings of the version that wrote it.
+    pub fn decode(buf: &[u8]) -> anyhow::Result<PgControlData> {
+        let layout_version = pg_control_layout_version(buf)?;
+        dispatch_pgversion!(layout_version, {
+            let control_file = pgv::ControlFileData::decode(buf)?;
+            Ok(PgControlData {
+                catalog_version_no: control_file.catalog_version_no,
+                state: control_file.state,
+                checkpoint: control_file.checkPoint,
+                checkpoint_copy: control_file.checkPointCopy.encode()?,
+                checkpoint_redo: control_file.checkPointCopy.redo,
+            })
+        })
+    }
+}
 
 pub fn bkpimage_is_compressed(bimg_info: u8, version: PgMajorVersion) -> bool {
     dispatch_pgversion!(version, pgv::bindings::bkpimg_is_compressed(bimg_info))

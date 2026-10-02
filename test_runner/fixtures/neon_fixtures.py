@@ -69,6 +69,7 @@ from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
 from fixtures.paths import get_test_repo_dir, shared_snapshot_dir
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     LocalFsStorage,
@@ -117,7 +118,6 @@ if TYPE_CHECKING:
 
     from fixtures.h2server import H2Server
     from fixtures.paths import SnapshotDirLocked
-    from fixtures.pg_version import PgVersion
 
     T = TypeVar("T")
 
@@ -3495,7 +3495,13 @@ class VanillaPostgres(PgProtocol):
         self.pg_bin = pg_bin
         self.running = False
         if init:
-            self.pg_bin.run_capture(["initdb", "--pgdata", str(pgdatadir)])
+            initdb_args = ["initdb", "--pgdata", str(pgdatadir)]
+            # Data checksums are enabled by default since v18. Neon doesn't
+            # maintain page checksums, so a cluster imported with them enabled
+            # would fail to verify the pages that the pageserver reconstructs.
+            if self.pg_bin.pg_version >= PgVersion.V18:
+                initdb_args.append("--no-data-checksums")
+            self.pg_bin.run_capture(initdb_args)
         self.configure([f"port = {port}\n"])
 
     def enable_tls(self):

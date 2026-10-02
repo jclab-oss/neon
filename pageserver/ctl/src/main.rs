@@ -29,7 +29,7 @@ use pageserver::tenant::metadata::TimelineMetadata;
 use pageserver::virtual_file::api::IoMode;
 use pageserver::virtual_file::{self};
 use pageserver_api::shard::TenantShardId;
-use postgres_ffi::ControlFileData;
+use postgres_ffi::{dispatch_pgversion, pg_control_layout_version};
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
 use utils::id::TimelineId;
@@ -196,9 +196,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn read_pg_control_file(control_file_path: &Utf8Path) -> anyhow::Result<()> {
-    let control_file = ControlFileData::decode(&std::fs::read(control_file_path)?)?;
-    println!("{control_file:?}");
-    let control_file_initdb = Lsn(control_file.checkPoint);
+    let buf = std::fs::read(control_file_path)?;
+    let checkpoint = dispatch_pgversion!(pg_control_layout_version(&buf)?, {
+        let control_file = pgv::ControlFileData::decode(&buf)?;
+        println!("{control_file:?}");
+        control_file.checkPoint
+    });
+    let control_file_initdb = Lsn(checkpoint);
     println!(
         "pg_initdb_lsn: {}, aligned: {}",
         control_file_initdb,

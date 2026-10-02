@@ -1296,17 +1296,30 @@ impl WalIngest {
         let RawXlogRecord { info, lsn, mut buf } = raw_record;
         let pg_version = modification.tline.pg_version;
 
+        // Since v17, the checkpoint record includes wal_level
         if info == pg_constants::XLOG_PARAMETER_CHANGE {
-            if let CheckPoint::V17(cp) = &mut self.checkpoint {
-                let rec = v17::XlParameterChange::decode(&mut buf);
-                cp.wal_level = rec.wal_level;
-                self.checkpoint_modified = true;
+            match &mut self.checkpoint {
+                CheckPoint::V17(cp) => {
+                    cp.wal_level = v17::XlParameterChange::decode(&mut buf).wal_level;
+                    self.checkpoint_modified = true;
+                }
+                CheckPoint::V18(cp) => {
+                    cp.wal_level = v18::XlParameterChange::decode(&mut buf).wal_level;
+                    self.checkpoint_modified = true;
+                }
+                _ => {}
             }
         } else if info == pg_constants::XLOG_END_OF_RECOVERY {
-            if let CheckPoint::V17(cp) = &mut self.checkpoint {
-                let rec = v17::XlEndOfRecovery::decode(&mut buf);
-                cp.wal_level = rec.wal_level;
-                self.checkpoint_modified = true;
+            match &mut self.checkpoint {
+                CheckPoint::V17(cp) => {
+                    cp.wal_level = v17::XlEndOfRecovery::decode(&mut buf).wal_level;
+                    self.checkpoint_modified = true;
+                }
+                CheckPoint::V18(cp) => {
+                    cp.wal_level = v18::XlEndOfRecovery::decode(&mut buf).wal_level;
+                    self.checkpoint_modified = true;
+                }
+                _ => {}
             }
         }
 
@@ -1571,7 +1584,7 @@ impl WalIngest {
                 use utils::rate_limit::RateLimit;
 
                 struct RateLimitPerPgVersion {
-                    rate_limiters: [Lazy<Mutex<RateLimit>>; 4],
+                    rate_limiters: [Lazy<Mutex<RateLimit>>; 5],
                 }
 
                 impl RateLimitPerPgVersion {
@@ -1579,7 +1592,7 @@ impl WalIngest {
                         Self {
                             rate_limiters: [const {
                                 Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(30))))
-                            }; 4],
+                            }; 5],
                         }
                     }
 
@@ -1588,7 +1601,7 @@ impl WalIngest {
                         pg_version: PgMajorVersion,
                     ) -> Option<&Lazy<Mutex<RateLimit>>> {
                         const MIN_PG_VERSION: u32 = PgMajorVersion::PG14.major_version_num();
-                        const MAX_PG_VERSION: u32 = PgMajorVersion::PG17.major_version_num();
+                        const MAX_PG_VERSION: u32 = PgMajorVersion::PG18.major_version_num();
                         let pg_version = pg_version.major_version_num();
 
                         if pg_version < MIN_PG_VERSION || pg_version > MAX_PG_VERSION {
