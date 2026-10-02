@@ -18,6 +18,7 @@ use crate::pg_helpers::{
 };
 use crate::tls::{self, SERVER_CRT, SERVER_KEY};
 
+use postgres_versioninfo::PgMajorVersion;
 use utils::shard::{ShardIndex, ShardNumber};
 
 /// Check that `line` is inside a text file and put it there if it is not.
@@ -241,6 +242,17 @@ pub fn write_postgres_conf(
         "neon.privileged_role_name={}",
         escape_conf_value(params.privileged_role_name.as_str())
     )?;
+
+    // Since v18, reads go through the AIO subsystem. The neon smgr completes
+    // them synchronously in the backend anyway, and the read stream code only
+    // issues prefetch requests (smgrprefetch()) with io_method=sync.
+    let pg_version = params
+        .pgversion
+        .trim_start_matches('v')
+        .parse::<PgMajorVersion>();
+    if matches!(pg_version, Ok(v) if v >= PgMajorVersion::PG18) {
+        writeln!(file, "io_method=sync")?;
+    }
 
     // If there are any extra options in the 'settings' field, append those
     if spec.cluster.settings.is_some() {
