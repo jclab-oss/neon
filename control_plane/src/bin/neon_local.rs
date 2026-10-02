@@ -577,6 +577,12 @@ struct EndpointCreateCmdArgs {
     /// If set, the node will be a hot replica on the specified timeline.
     #[clap(long, action = clap::ArgAction::Set, default_value_t = false)]
     hot_standby: bool,
+    /// If set, the node will be a local branch: it starts from the current end of the
+    /// branch, and keeps its changes on its local disk instead of writing them to the
+    /// branch. Nothing else may write to the branch afterwards, so use a branch that's
+    /// dedicated to it.
+    #[clap(long)]
+    local_branch: bool,
     /// If set, will set up the catalog for neon_superuser.
     #[clap(long)]
     update_catalog: bool,
@@ -1316,6 +1322,29 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
     Ok(())
 }
 
+/// The LSN of the end of a timeline, i.e. its last record.
+async fn timeline_end_lsn(
+    env: &local_env::LocalEnv,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<Lsn> {
+    let storage_controller = StorageController::from_env(env);
+    let locate_result = storage_controller.tenant_locate(tenant_id).await?;
+    let shard = locate_result
+        .shards
+        .first()
+        .ok_or_else(|| anyhow!("tenant {tenant_id} has no shards"))?;
+    let pageserver = PageServerNode::from_env(env, env.get_pageserver_conf(shard.node_id)?);
+    let timeline_info = pageserver
+        .timeline_info(
+            shard.shard_id,
+            timeline_id,
+            pageserver_client::mgmt_api::ForceAwaitLogicalSize::No,
+        )
+        .await?;
+    Ok(timeline_info.last_record_lsn)
+}
+
 async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Result<()> {
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
@@ -1346,8 +1375,8 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .filter(|(_, endpoint)| endpoint.tenant_id == tenant_shard_id.tenant_id)
             {
                 let lsn_str = match endpoint.mode {
-                    ComputeMode::Static(lsn) => {
-                        // -> read-only endpoint
+                    ComputeMode::Static(lsn) | ComputeMode::Local(lsn) => {
+                        // -> read-only endpoint, or local branch
                         // Use the node's LSN.
                         lsn.to_string()
                     }
@@ -1393,11 +1422,17 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .get_branch_timeline_id(&branch_name, tenant_id)
                 .ok_or_else(|| anyhow!("Found no timeline id for branch name '{branch_name}'"))?;
 
-            let mode = match (args.lsn, args.hot_standby) {
-                (Some(lsn), false) => ComputeMode::Static(lsn),
-                (None, true) => ComputeMode::Replica,
-                (None, false) => ComputeMode::Primary,
-                (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+            let mode = match (args.lsn, args.hot_standby, args.local_branch) {
+                (Some(lsn), false, false) => ComputeMode::Static(lsn),
+                (None, true, false) => ComputeMode::Replica,
+                (None, false, false) => ComputeMode::Primary,
+                (None, false, true) => {
+                    ComputeMode::Local(timeline_end_lsn(env, tenant_id, timeline_id).await?)
+                }
+                (Some(_), true, _) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+                (_, _, true) => {
+                    anyhow::bail!("cannot specify lsn or hot-standby for a local branch")
+                }
             };
 
             match (mode, args.hot_standby) {
@@ -1505,7 +1540,12 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             let ps_conf = env.get_pageserver_conf(DEFAULT_PAGESERVER_ID)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
-                let claims = Claims::new(Some(endpoint.tenant_id), Scope::Tenant);
+                // A local branch only reads from the pageserver.
+                let scope = match endpoint.mode {
+                    ComputeMode::Local(_) => Scope::TenantReadOnly,
+                    _ => Scope::Tenant,
+                };
+                let claims = Claims::new(Some(endpoint.tenant_id), scope);
 
                 Some(env.generate_auth_token(&claims)?)
             } else {

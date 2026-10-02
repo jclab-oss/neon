@@ -286,6 +286,25 @@ impl ComputeControlPlane {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<()> {
+        // A local branch reads the timeline at a fixed LSN, which must remain the end
+        // of the timeline, so nothing may write to it. (Several local branches can
+        // share it, though, they don't write to it.)
+        if mode.is_read_write() {
+            let mut writers = self.endpoints.iter().filter(|(_k, v)| {
+                v.tenant_id == tenant_id
+                    && v.timeline_id == timeline_id
+                    && v.mode.is_read_write()
+                    && v.mode != mode
+                    && v.status() != EndpointStatus::Stopped
+            });
+            if let Some((key, _)) = writers.next() {
+                bail!(
+                    "attempting to create a {} endpoint on tenant {tenant_id}, timeline {timeline_id}, which conflicts with endpoint {key:?}: nothing may write to the timeline of a local branch",
+                    mode.to_type_str()
+                );
+            }
+        }
+
         if matches!(mode, ComputeMode::Primary) {
             // this check is not complete, as you could have a concurrent attempt at
             // creating another primary, both reading the state before checking it here,
@@ -536,6 +555,10 @@ impl Endpoint {
             ComputeMode::Static(lsn) => {
                 conf.append("recovery_target_lsn", &lsn.to_string());
             }
+            ComputeMode::Local(_) => {
+                // A local branch keeps its WAL to itself, so there's no replication to
+                // configure. compute_ctl takes care of the rest.
+            }
             ComputeMode::Replica => {
                 assert!(!self.env.safekeepers.is_empty());
 
@@ -707,8 +730,9 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
 
         // We always start the compute node from scratch, so if the Postgres
-        // data dir exists from a previous launch, remove it first.
-        if self.pgdata().exists() {
+        // data dir exists from a previous launch, remove it first. Except for a
+        // local branch, whose data lives there.
+        if self.pgdata().exists() && !matches!(self.mode, ComputeMode::Local(_)) {
             std::fs::remove_dir_all(self.pgdata())?;
         }
 

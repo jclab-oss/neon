@@ -4756,6 +4756,7 @@ class Endpoint(PgProtocol, LogUtils):
         allow_multiple: bool = False,
         update_catalog: bool = False,
         privileged_role_name: str | None = None,
+        local_branch: bool = False,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -4784,6 +4785,7 @@ class Endpoint(PgProtocol, LogUtils):
             allow_multiple=allow_multiple,
             update_catalog=update_catalog,
             privileged_role_name=privileged_role_name,
+            local_branch=local_branch,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -5121,6 +5123,7 @@ class Endpoint(PgProtocol, LogUtils):
         basebackup_request_tries: int | None = None,
         autoprewarm: bool = False,
         offload_lfc_interval_seconds: int | None = None,
+        local_branch: bool = False,
     ) -> Self:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -5136,6 +5139,7 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            local_branch=local_branch,
         ).start(
             remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
@@ -5229,6 +5233,7 @@ class EndpointFactory:
         basebackup_request_tries: int | None = None,
         autoprewarm: bool = False,
         offload_lfc_interval_seconds: int | None = None,
+        local_branch: bool = False,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -5252,6 +5257,7 @@ class EndpointFactory:
             basebackup_request_tries=basebackup_request_tries,
             autoprewarm=autoprewarm,
             offload_lfc_interval_seconds=offload_lfc_interval_seconds,
+            local_branch=local_branch,
         )
 
     def create(
@@ -5266,6 +5272,7 @@ class EndpointFactory:
         pageserver_id: int | None = None,
         update_catalog: bool = False,
         privileged_role_name: str | None = None,
+        local_branch: bool = False,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -5290,6 +5297,7 @@ class EndpointFactory:
             pageserver_id=pageserver_id,
             update_catalog=update_catalog,
             privileged_role_name=privileged_role_name,
+            local_branch=local_branch,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
