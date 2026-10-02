@@ -11,6 +11,7 @@
 #include "postmaster/interrupt.h"
 #include "replication/slot.h"
 #include "storage/fd.h"
+#include "storage/latch.h"
 #include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/guc.h"

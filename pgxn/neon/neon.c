@@ -23,6 +23,9 @@
 #include "replication/walsender.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
+#if PG_MAJORVERSION_NUM >= 18
+#include "storage/aio.h"
+#endif
 #include "funcapi.h"
 #include "access/htup_details.h"
 #include "utils/builtins.h"
@@ -510,6 +513,16 @@ _PG_init(void)
 
 	/* Stage 1: Define GUCs, and other early intialization */
 	pg_init_libpagestore();
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * Since v18, the read stream code only calls smgrprefetch() ahead of the
+	 * reads with io_method=sync. Reads still work with the other methods, as
+	 * our smgr executes them synchronously anyway, but nothing is prefetched.
+	 */
+	if (io_method != IOMETHOD_SYNC)
+		ereport(WARNING,
+				(errmsg("neon: io_method is not \"sync\", so prefetching is disabled")));
+#endif
 	relsize_hash_init();
 	lfc_init();
 	pg_init_walproposer();
