@@ -22,7 +22,9 @@ pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<
             | Scope::Infra
             | Scope::Scrubber
             | Scope::ControllerPeer
-            | Scope::TenantEndpoint,
+            | Scope::TenantEndpoint
+            // Read-only tokens are for computes that don't write WAL to safekeepers.
+            | Scope::TenantReadOnly,
             _,
         ) => Err(AuthError(
             format!(

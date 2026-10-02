@@ -53,7 +53,7 @@ Payload:
 
 ```
 {
-  "scope": "tenant",  # "tenant", "pageserverapi", or "safekeeperdata"
+  "scope": "tenant",  # "tenant", "tenant_read_only", "pageserverapi", or "safekeeperdata"
   "tenant_id": "5204921ff44f09de8094a1390a6a50f6",
 }
 ```
@@ -62,6 +62,15 @@ Payload:
 Meanings of scope:
 
 "tenant": Provides access to all data for a specific tenant
+
+"tenant_read_only": Provides read-only access to the data of a specific tenant.
+The pageserver accepts it for GetPage requests and basebackups (`pagestream_v2`,
+`pagestream_v3`, `basebackup` and `fullbackup` commands, and the gRPC page service
+except `LeaseLsn`), and rejects it everywhere else, including LSN leases and the
+management API. Safekeepers reject it entirely.
+It is meant for computes that keep their writes local instead of sending WAL to safekeepers.
+Pageservers and safekeepers that predate this scope fail to parse it and reject the token,
+so it never grants more access than intended. Existing "tenant" tokens are unaffected.
 
 "pageserverapi": Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
 Should only be used e.g. for status check/tenant creation/list.
@@ -145,6 +154,7 @@ Pageserver replicas' authentication is the same as the main's.
 #### Incoming connections
 Pageserver listens for connections from computes.
 Each compute should present a token valid for the timeline's tenant.
+A "tenant_read_only" token is enough for reading pages and taking basebackups.
 
 Pageserver also has HTTP API: some parts are per-tenant,
 some parts are server-wide, these are different scopes.

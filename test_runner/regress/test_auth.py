@@ -6,10 +6,11 @@ from pathlib import Path
 
 import psycopg2
 import pytest
-from fixtures.common_types import TenantId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    PgBin,
     PgProtocol,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -248,3 +249,93 @@ def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         check_safekeeper(False, password=invalid_tenant_token)
         check_safekeeper(False, password=pageserver_token)
         check_safekeeper(True, password=safekeeper_token)
+
+
+def test_tenant_read_only_token(
+    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path
+):
+    """
+    A tenant_read_only token grants the page service requests that read the tenant's data, and
+    nothing else: no pageserver management API, no LSN leases, and no safekeeper access.
+    """
+    neon_env_builder.auth_enabled = True
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Make sure the timeline exists on the safekeepers.
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("CREATE TABLE t AS SELECT generate_series(1, 100) AS x")
+    endpoint.stop()
+
+    read_only_token = env.auth_keys.generate_tenant_read_only_token(tenant_id)
+    other_read_only_token = env.auth_keys.generate_tenant_read_only_token(TenantId.generate())
+    tenant_token = env.auth_keys.generate_tenant_token(tenant_id)
+    pageserver_token = env.auth_keys.generate_pageserver_token()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Tenant id mismatch. Permission denied.*",
+            ".*JWT scope 'TenantReadOnly' only permits reading tenant data.*",
+        ]
+    )
+
+    def pageserver_query(query: str, token: str):
+        with closing(env.pageserver.connect(password=token)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+
+    # Page requests are allowed, but only for the token's tenant.
+    pagestream = f"pagestream_v2 {tenant_id} {timeline_id}"
+    pageserver_query(pagestream, read_only_token)
+    with pytest.raises(psycopg2.Error, match="JWT authentication error"):
+        pageserver_query(pagestream, other_read_only_token)
+
+    # So are basebackups.
+    basebackup_tar = test_output_dir / "basebackup.tar"
+    pg_bin.run_capture(
+        [
+            "psql",
+            "--no-psqlrc",
+            env.pageserver.connstr(password=read_only_token),
+            "-c",
+            f"basebackup {tenant_id} {timeline_id}",
+            "-o",
+            str(basebackup_tar),
+        ]
+    )
+    assert basebackup_tar.stat().st_size > 0
+
+    # LSN leases hold back GC, so they require a read-write token.
+    pageserver_http = env.pageserver.http_client(auth_token=pageserver_token)
+    lsn = Lsn(pageserver_http.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
+    lease = f"lease lsn {tenant_id} {timeline_id} {lsn}"
+    with pytest.raises(psycopg2.Error, match="JWT authentication error"):
+        pageserver_query(lease, read_only_token)
+    pageserver_query(lease, tenant_token)
+
+    # The management API is off limits, even for reads.
+    read_only_http = env.pageserver.http_client(auth_token=read_only_token)
+    assert_client_not_authorized(env, read_only_http)
+    with pytest.raises(PageserverApiException, match="Forbidden: JWT authentication error"):
+        read_only_http.timeline_detail(tenant_id, timeline_id)
+    with pytest.raises(PageserverApiException, match="Forbidden: JWT authentication error"):
+        read_only_http.timeline_lsn_lease(tenant_id, timeline_id, lsn)
+
+    # Safekeepers reject read-only tokens on both of their libpq ports.
+    sk = env.safekeepers[0]
+    for port in [sk.port.pg, sk.port.pg_tenant_only]:
+        sk_pg = PgProtocol(
+            host="localhost",
+            port=port,
+            options=f"ztenantid={tenant_id} ztimelineid={timeline_id}",
+        )
+
+        def identify_system(token: str, sk_pg: PgProtocol = sk_pg):
+            with closing(sk_pg.connect(password=token)) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("IDENTIFY_SYSTEM")
+
+        identify_system(tenant_token)
+        with pytest.raises(psycopg2.Error):
+            identify_system(read_only_token)
