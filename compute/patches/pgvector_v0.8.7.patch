@@ -1,0 +1,48 @@
+diff --git a/src/hnswbuild.c b/src/hnswbuild.c
+index bb2e9dc..0975e16 100644
+--- a/src/hnswbuild.c
++++ b/src/hnswbuild.c
+@@ -877,9 +877,17 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
+ 
+ 	hnswarea = shm_toc_lookup(toc, PARALLEL_KEY_HNSW_AREA, false);
+ 
++#ifdef NEON_SMGR
++	smgr_start_unlogged_build(RelationGetSmgr(indexRel));
++#endif
++
+ 	/* Perform inserts */
+ 	HnswParallelScanAndInsert(heapRel, indexRel, hnswshared, hnswarea, false);
+ 
++#ifdef NEON_SMGR
++	smgr_finish_unlogged_build_phase_1(RelationGetSmgr(indexRel));
++#endif
++
+ 	/* Close relations within worker */
+ 	index_close(indexRel, indexLockmode);
+ 	table_close(heapRel, heapLockmode);
+@@ -1135,13 +1143,25 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+ 	SeedRandom(42);
+ #endif
+ 
++#ifdef NEON_SMGR
++	smgr_start_unlogged_build(RelationGetSmgr(index));
++#endif
++
+ 	InitBuildState(buildstate, heap, index, indexInfo, forkNum);
+ 
+ 	BuildGraph(buildstate);
+ 
++#ifdef NEON_SMGR
++	smgr_finish_unlogged_build_phase_1(RelationGetSmgr(index));
++#endif
++
+ 	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM)
+ 		log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
+ 
++#ifdef NEON_SMGR
++	smgr_end_unlogged_build(RelationGetSmgr(index));
++#endif
++
+ 	FreeBuildState(buildstate);
+ }
+ 
