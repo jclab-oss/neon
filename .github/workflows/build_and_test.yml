@@ -1395,7 +1395,20 @@ jobs:
           NEW_COMPUTE_TAG: ${{ needs.meta.outputs.build-tag }}
           OLD_COMPUTE_TAG: ${{ needs.meta.outputs.previous-compute-release }}
           REPOSITORY: ghcr.io/${{ github.repository_owner }}
-        run: ./docker-compose/test_extensions_upgrade.sh
+          # The script defaults to v16, the compute image of which isn't built when the `pg-versions` job leaves
+          # v16 out: test this matrix entry's version instead
+          MATRIX_PG_VERSION: ${{ matrix.pg_version }}
+        # run: ./docker-compose/test_extensions_upgrade.sh
+        run: |
+          pg_version=${MATRIX_PG_VERSION#v}
+          # The previous compute release may have been built without this Postgres version (see the `pg-versions` job)
+          for image in "compute-node-v${pg_version}" "neon-test-extensions-v${pg_version}"; do
+            if ! docker manifest inspect "${REPOSITORY}/${image}:${OLD_COMPUTE_TAG}" > /dev/null; then
+              echo "::warning::${REPOSITORY}/${image}:${OLD_COMPUTE_TAG} not found, skipping the ${MATRIX_PG_VERSION} extension upgrade test"
+              exit 0
+            fi
+          done
+          PG_VERSION=${pg_version} ./docker-compose/test_extensions_upgrade.sh
 
       - name: Print logs and clean up
         if: always()
