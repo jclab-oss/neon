@@ -1,8 +1,7 @@
 name: "Docker cache registry"
 description: >
-  Picks the registry for BuildKit's layer cache (and for images nothing outside the run uses) and logs in
-  to it. With `cache-registry` set (the DOCKER_CACHE_REGISTRY repository variable, e.g.
-  `asia-northeast3-docker.pkg.dev/my-project/ci-cache`), that is a Google Artifact Registry repository the
+  Picks the registry for BuildKit's layer cache and logs in to it. With `cache-registry` set (the
+  DOCKER_CACHE_REGISTRY repository variable, e.g. `asia-northeast3-docker.pkg.dev/my-project/ci-cache`), that is a Google Artifact Registry repository the
   self-hosted runners reach with their GCE VM's service account, next to the runners, so the cache never
   leaves the cloud the runners run in; otherwise it is GHCR, next to the images, as before.
 
@@ -22,7 +21,7 @@ inputs:
 
 outputs:
   registry:
-    description: "The registry the cache (and run-local images) go to: `cache-registry`, or `ghcr.io/<repository owner>`"
+    description: "The registry the cache goes to: `cache-registry`, or `ghcr.io/<repository owner>`"
     value: ${{ steps.refs.outputs.registry }}
   cache-from:
     description: "`cache-from` for docker/build-push-action: main's cache, and on PRs the PR's own cache as well"

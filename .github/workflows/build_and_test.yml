@@ -1129,7 +1129,10 @@ jobs:
     if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')) }}
     # Upstream's self-hosted runner labels; here runners come from the RUNNER_* repository variables (see .github/actionlint.yml)
     # runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
-    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_LARGE_ARM64, '[') && fromJSON(vars.RUNNER_LARGE_ARM64) || vars.RUNNER_LARGE_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_LARGE, '[') && fromJSON(vars.RUNNER_LARGE) || vars.RUNNER_LARGE || 'ubuntu-22.04') }}
+    # Small runners are enough: the VM image build takes 3-4 minutes even on the large ones (mostly copying the
+    # compute image's ~0.5 GB into a 2G disk image), while waiting up to half an hour for one behind the
+    # compute-node-image-arch builds.
+    runs-on: ${{ matrix.arch == 'arm64' && (startsWith(vars.RUNNER_SMALL_ARM64, '[') && fromJSON(vars.RUNNER_SMALL_ARM64) || vars.RUNNER_SMALL_ARM64 || 'ubuntu-22.04-arm') || (startsWith(vars.RUNNER_SMALL, '[') && fromJSON(vars.RUNNER_SMALL) || vars.RUNNER_SMALL || 'ubuntu-22.04') }}
     permissions:
       contents: read
       packages: write
@@ -1172,16 +1175,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Nothing outside a PR run uses its VM images: push-compute-image-dev has no tag to add for a PR. So on PRs,
-      # with the DOCKER_CACHE_REGISTRY repository variable set, they go to that registry, next to the runners, instead
-      # of GHCR (and vm-compute-node-image skips the multi-arch image). Runs whose images get tagged and released
-      # (main, release PRs, manual runs) keep pushing them to GHCR.
-      - name: Pick the registry for the VM image
-        id: vm-registry
-        uses: ./.github/actions/docker-cache-registry
-        with:
-          cache-registry: ${{ needs.meta.outputs.run-kind == 'pr' && vars.DOCKER_CACHE_REGISTRY || '' }}
-
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
@@ -1199,14 +1192,14 @@ jobs:
             -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-            -dst=${{ steps.vm-registry.outputs.registry }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
+            -dst=ghcr.io/${{ github.repository_owner }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
             -target-arch=linux/${{ matrix.arch }}
 
       - name: Pushing vm-compute-node image
         run: |
-          # Images live in this repository owner's GHCR namespace (or DOCKER_CACHE_REGISTRY, see above) instead of `neondatabase`
+          # Images live in this repository owner's GHCR namespace instead of `neondatabase`
           # docker push ghcr.io/neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
-          docker push ${{ steps.vm-registry.outputs.registry }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
+          docker push ghcr.io/${{ github.repository_owner }}/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
 
   vm-compute-node-image:
     # Also needs the Postgres versions selected by the `pg-versions` job
@@ -1215,13 +1208,7 @@ jobs:
     # Also for manual runs (run-kind `workflow-dispatch`), and for release PRs of all components
     # (`rc/release-all/*`, see release.yml), which release compute too
     # if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    # Not for PRs whose VM images went to DOCKER_CACHE_REGISTRY (see vm-compute-node-image-arch): nothing uses a PR's
-    # multi-arch VM image, and this GitHub-hosted job can't log in there.
-    if: >-
-      ${{
-        (contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')))
-        && !(needs.meta.outputs.run-kind == 'pr' && vars.DOCKER_CACHE_REGISTRY != '')
-      }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "workflow-dispatch", "compute-rc-pr"]'), needs.meta.outputs.run-kind) || (needs.meta.outputs.run-kind == 'storage-rc-pr' && startsWith(github.head_ref, 'rc/release-all/')) }}
     permissions:
       packages: write
     runs-on: ubuntu-22.04
@@ -1395,7 +1382,20 @@ jobs:
           NEW_COMPUTE_TAG: ${{ needs.meta.outputs.build-tag }}
           OLD_COMPUTE_TAG: ${{ needs.meta.outputs.previous-compute-release }}
           REPOSITORY: ghcr.io/${{ github.repository_owner }}
-        run: ./docker-compose/test_extensions_upgrade.sh
+          # The script defaults to v16, the compute image of which isn't built when the `pg-versions` job leaves
+          # v16 out: test this matrix entry's version instead
+          MATRIX_PG_VERSION: ${{ matrix.pg_version }}
+        # run: ./docker-compose/test_extensions_upgrade.sh
+        run: |
+          pg_version=${MATRIX_PG_VERSION#v}
+          # The previous compute release may have been built without this Postgres version (see the `pg-versions` job)
+          for image in "compute-node-v${pg_version}" "neon-test-extensions-v${pg_version}"; do
+            if ! docker manifest inspect "${REPOSITORY}/${image}:${OLD_COMPUTE_TAG}" > /dev/null; then
+              echo "::warning::${REPOSITORY}/${image}:${OLD_COMPUTE_TAG} not found, skipping the ${MATRIX_PG_VERSION} extension upgrade test"
+              exit 0
+            fi
+          done
+          PG_VERSION=${pg_version} ./docker-compose/test_extensions_upgrade.sh
 
       - name: Print logs and clean up
         if: always()
