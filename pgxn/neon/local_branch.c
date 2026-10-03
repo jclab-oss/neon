@@ -49,7 +49,10 @@
  * sync requests with the md.c sync handler, which finds the files by their
  * md.c path. That is enough for blocks that have been written locally before.
  * If we crash before the next checkpoint, WAL replay restores them from
- * full-page images, so full_page_writes must be on.
+ * full-page images, so full_page_writes must be on. And so must wal_log_hints:
+ * Neon's Postgres advances the page LSN when it sets the all-visible flag, and
+ * without wal_log_hints, it doesn't WAL-log a full-page image for that, so the
+ * page's later changes until the next checkpoint wouldn't have one either.
  *
  * The first local write of a block that comes from the pageserver needs more
  * care. If its bit in the map file became durable before the data, a crash
@@ -192,10 +195,16 @@ pg_init_local_branch(void)
 		ereport(ERROR,
 				(errmsg(NEON_TAG "neon.debug_compare_local can't be used with neon.compute_mode=local")));
 
-	/* Losing a write after a crash would lose data that exists nowhere else */
-	if (!enableFsync || !fullPageWrites)
+	/*
+	 * Losing a write after a crash would lose data that exists nowhere else.
+	 * wal_log_hints is needed because Neon's Postgres advances the page LSN
+	 * when it sets the all-visible flag, without a full-page image unless
+	 * hint bits are WAL-logged, which would leave the page unprotected from
+	 * torn writes until the next checkpoint.
+	 */
+	if (!enableFsync || !fullPageWrites || !wal_log_hints)
 		ereport(WARNING,
-				(errmsg(NEON_TAG "fsync and full_page_writes should be on in a local branch"),
+				(errmsg(NEON_TAG "fsync, full_page_writes and wal_log_hints should be on in a local branch"),
 				 errdetail("A crash could corrupt the branch.")));
 
 	neon_local_branch = true;

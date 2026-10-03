@@ -80,7 +80,7 @@ branch at `lsn` on the spec's timeline. Compared to a primary:
   the `tenant_read_only` scope. compute_ctl refuses the spec otherwise.
 - compute_ctl takes the basebackup at `lsn`, doesn't sync safekeepers, and
   configures Postgres with `neon.compute_mode=local`, `neon.local_branch_lsn`,
-  `fsync=on`, `full_page_writes=on`, and no `neon.safekeepers` or
+  `fsync=on`, `full_page_writes=on`, `wal_log_hints=on`, and no `neon.safekeepers` or
   `synchronous_standby_names`, overriding the spec's settings.
 - Once Postgres runs for the first time, compute_ctl runs a checkpoint and removes
   `neon.signal`, so that from then on, Postgres starts from its own data directory
@@ -129,6 +129,12 @@ before the data, or a crash could leave a hole where the pageserver's version of
 the page used to be, which nothing in the WAL would restore if only hint bits had
 changed. So that write fsyncs the data file before setting the bit. All map file
 changes are durable immediately.
+
+Protection against torn pages relies on every change to a page after a
+checkpoint's redo pointer being preceded by a full-page image of it. Neon's
+Postgres advances the page LSN when VACUUM sets the all-visible flag, without a
+full-page image unless hint bits are WAL-logged, so a local branch runs with
+`wal_log_hints=on`.
 
 `smgrtruncate()` is called in a critical section, so the truncate path doesn't do
 network I/O, and allocates memory in a context that allows it.
