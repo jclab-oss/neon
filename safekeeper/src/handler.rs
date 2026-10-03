@@ -279,6 +279,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
             .map_err(|e| QueryError::Unauthorized(e.0))?;
 
+        // Read-only tokens never grant access to safekeepers.
+        if matches!(data.claims.scope, Scope::TenantReadOnly) {
+            return Err(QueryError::Unauthorized(
+                "JWT scope 'TenantReadOnly' is ineligible for Safekeeper auth".into(),
+            ));
+        }
+
         // The handler might be configured to allow only tenant scope tokens.
         if matches!(allowed_auth_scope, Scope::Tenant)
             && !matches!(data.claims.scope, Scope::Tenant)

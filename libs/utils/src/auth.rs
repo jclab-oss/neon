@@ -31,6 +31,14 @@ pub enum Scope {
     /// token authorizing access to all data of a tenant, so the spec-fetch API requires a TenantEndpoint
     /// scope token to ensure that untrusted compute nodes can't fetch spec for arbitrary endpoints.
     TenantEndpoint,
+    /// Provides read-only access to the data of a specific tenant (specified in `struct Claims`
+    /// below). The pageserver serves page reads and basebackups with it, but rejects everything
+    /// else, and safekeepers reject it entirely. Used by computes that keep their writes local.
+    ///
+    /// Servers that predate this scope fail to decode such tokens, so they reject them instead of
+    /// mistaking them for a read-write `Tenant` token.
+    #[serde(rename = "tenant_read_only")]
+    TenantReadOnly,
     /// Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
     /// Should only be used e.g. for status check/tenant creation/list.
     PageServerApi,
@@ -286,5 +294,23 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let decoded: TokenData<Claims> = auth.decode(&encoded).unwrap();
 
         assert_eq!(decoded.claims, claims);
+    }
+
+    #[test]
+    fn test_scope_serde() {
+        let parse = |scope: &str| -> Claims {
+            serde_json::from_str(&format!(
+                r#"{{"scope": "{scope}", "tenant_id": "3d1f7595b468230304e0b73cecbcb081"}}"#
+            ))
+            .unwrap()
+        };
+
+        // Existing tenant tokens keep their read-write meaning.
+        assert_eq!(parse("tenant").scope, Scope::Tenant);
+        assert_eq!(parse("tenant_read_only").scope, Scope::TenantReadOnly);
+        assert_eq!(
+            serde_json::to_value(Scope::TenantReadOnly).unwrap(),
+            "tenant_read_only"
+        );
     }
 }

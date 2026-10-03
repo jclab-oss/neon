@@ -62,7 +62,7 @@ use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::tls::watch_cert_for_changes;
-use crate::{config, extension_server, local_proxy};
+use crate::{config, extension_server, local_branch, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
@@ -265,6 +265,10 @@ pub struct ParsedSpec {
 
 impl ParsedSpec {
     pub fn validate(&self) -> Result<(), String> {
+        if let ComputeMode::Local(_) = self.spec.mode {
+            return local_branch::validate_spec(self);
+        }
+
         // Only Primary nodes are using safekeeper_connstrings, and at the moment
         // this method only validates that part of the specs.
         if self.spec.mode != ComputeMode::Primary {
@@ -1003,10 +1007,13 @@ impl ComputeNode {
         let postmaster_pid = pg_process.pid();
         *pg_handle = Some(pg_process);
 
+        // A new local branch must not start from the basebackup again.
+        local_branch::finish_start(self, pspec)?;
+
         // If this is a primary endpoint, perform some post-startup configuration before
         // opening it up for the world.
         let config_time = Utc::now();
-        if pspec.spec.mode == ComputeMode::Primary {
+        if pspec.spec.mode.is_read_write() {
             self.configure_as_primary(&compute_state)?;
 
             let conf = self.get_tokio_conn_conf(None);
@@ -1287,7 +1294,7 @@ impl ComputeNode {
                 .get_base_backup(page_api::GetBaseBackupRequest {
                     lsn: (lsn != Lsn(0)).then_some(lsn),
                     compression: BaseBackupCompression::Gzip,
-                    replica: spec.spec.mode != ComputeMode::Primary,
+                    replica: !spec.spec.mode.is_read_write(),
                     full: false,
                 })
                 .await?;
@@ -1335,7 +1342,7 @@ impl ComputeNode {
 
         let basebackup_cmd = match lsn {
             Lsn(0) => {
-                if spec.spec.mode != ComputeMode::Primary {
+                if !spec.spec.mode.is_read_write() {
                     format!(
                         "basebackup {} {} --gzip --replica",
                         spec.tenant_id, spec.timeline_id
@@ -1345,7 +1352,7 @@ impl ComputeNode {
                 }
             }
             _ => {
-                if spec.spec.mode != ComputeMode::Primary {
+                if !spec.spec.mode.is_read_write() {
                     format!(
                         "basebackup {} {} {} --gzip --replica",
                         spec.tenant_id, spec.timeline_id, lsn
@@ -1607,8 +1614,16 @@ impl ComputeNode {
         let databricks_settings = spec.databricks_settings.as_ref();
         let postgres_port = self.params.connstr.port();
 
+        // A local branch keeps its data directory across restarts.
+        let resume_local_branch = match spec.mode {
+            ComputeMode::Local(lsn) => local_branch::can_resume(pgdata_path, pspec, lsn)?,
+            _ => false,
+        };
+
         // Remove/create an empty pgdata directory and put configuration there.
-        self.create_pgdata()?;
+        if !resume_local_branch {
+            self.create_pgdata()?;
+        }
         config::write_postgres_conf(
             pgdata_path,
             &self.params,
@@ -1644,10 +1659,19 @@ impl ComputeNode {
                 info!("Initializing standby from latest Pageserver LSN");
                 Lsn(0)
             }
+            ComputeMode::Local(lsn) => {
+                info!("Starting local branch at LSN {}", lsn);
+                lsn
+            }
         };
 
-        self.get_basebackup(compute_state, lsn)
-            .with_context(|| format!("failed to get basebackup@{lsn}"))?;
+        if !resume_local_branch {
+            self.get_basebackup(compute_state, lsn)
+                .with_context(|| format!("failed to get basebackup@{lsn}"))?;
+            if let ComputeMode::Local(lsn) = spec.mode {
+                local_branch::init_data_dir(pgdata_path, pspec, lsn)?;
+            }
+        }
 
         if let Some(settings) = databricks_settings {
             copy_tls_certificates(
@@ -1715,7 +1739,7 @@ impl ComputeNode {
         symlink("/dev/shm/", pgdata_path.join("pg_dynshmem"))?;
 
         match spec.mode {
-            ComputeMode::Primary => {}
+            ComputeMode::Primary | ComputeMode::Local(_) => {}
             ComputeMode::Replica | ComputeMode::Static(..) => {
                 add_standby_signal(pgdata_path)?;
             }
@@ -2151,7 +2175,7 @@ impl ComputeNode {
             config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
                 self.pg_reload_conf()?;
 
-                if spec.mode == ComputeMode::Primary {
+                if spec.mode.is_read_write() {
                     let conf = self.get_tokio_conn_conf(Some("compute_ctl:reconfigure"));
                     let conf = Arc::new(conf);
 
@@ -2179,7 +2203,7 @@ impl ComputeNode {
     pub fn configure_as_primary(&self, compute_state: &ComputeState) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
 
-        assert!(pspec.spec.mode == ComputeMode::Primary);
+        assert!(pspec.spec.mode.is_read_write());
         if !pspec.spec.skip_pg_catalog_updates {
             let pgdata_path = Path::new(&self.params.pgdata);
             // temporarily reset max_cluster_size in config

@@ -213,6 +213,9 @@ pub fn write_postgres_conf(
             // hot_standby is 'on' by default, but let's be explicit
             writeln!(file, "hot_standby=on")?;
         }
+        ComputeMode::Local(lsn) => {
+            writeln!(file, "neon.local_branch_lsn='{lsn}'")?;
+        }
     }
 
     if cfg!(target_os = "linux") {
@@ -247,6 +250,24 @@ pub fn write_postgres_conf(
         writeln!(file, "# Managed by compute_ctl: begin")?;
         write!(file, "{}", spec.cluster.settings.as_pg_settings())?;
         writeln!(file, "# Managed by compute_ctl: end")?;
+    }
+
+    // A local branch's data exists only on the local disk, so it must survive
+    // crashes, and there are no safekeepers to wait for. This comes after the
+    // settings from the spec, to override them. wal_log_hints is needed for
+    // torn page protection, because Neon's Postgres advances the page LSN when
+    // it sets the all-visible flag, see pgxn/neon/local_branch.c.
+    if let ComputeMode::Local(_) = spec.mode {
+        writeln!(
+            file,
+            "# Managed by compute_ctl local branch settings: begin"
+        )?;
+        writeln!(file, "fsync=on")?;
+        writeln!(file, "full_page_writes=on")?;
+        writeln!(file, "wal_log_hints=on")?;
+        writeln!(file, "synchronous_standby_names=''")?;
+        writeln!(file, "neon.safekeepers=''")?;
+        writeln!(file, "# Managed by compute_ctl local branch settings: end")?;
     }
 
     // If base audit logging is enabled, configure it.

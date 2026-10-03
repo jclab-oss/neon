@@ -53,7 +53,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::service::Interceptor as _;
 use tonic::transport::server::TcpConnectInfo;
 use tracing::*;
-use utils::auth::{Claims, Scope, SwappableJwtAuth};
+use utils::auth::{AuthError, Claims, Scope, SwappableJwtAuth};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::logging::log_slow;
 use utils::lsn::Lsn;
@@ -63,7 +63,7 @@ use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{failpoint_support, span_record};
 
-use crate::auth::check_permission;
+use crate::auth::{check_permission, check_read_permission};
 use crate::basebackup::{self, BasebackupError};
 use crate::config::PageServerConf;
 use crate::context::{
@@ -2808,6 +2808,19 @@ impl PageServerHandler {
             .expect("claims presence already checked");
         check_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
     }
+
+    /// Like `check_permission`, but for requests that only read the tenant's data. These are
+    /// also allowed with read-only tokens.
+    fn check_read_permission(&self, tenant_id: TenantId) -> Result<(), QueryError> {
+        if self.auth.is_none() {
+            return Ok(());
+        }
+        let claims = self
+            .claims
+            .as_ref()
+            .expect("claims presence already checked");
+        check_read_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
+    }
 }
 
 /// `basebackup tenant timeline [lsn] [--gzip] [--replica]`
@@ -3105,9 +3118,15 @@ where
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
             .map_err(|e| QueryError::Unauthorized(e.0))?;
 
-        if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
+        if matches!(data.claims.scope, Scope::Tenant | Scope::TenantReadOnly)
+            && data.claims.tenant_id.is_none()
+        {
             return Err(QueryError::Unauthorized(
-                "jwt token scope is Tenant, but tenant id is missing".into(),
+                format!(
+                    "jwt token scope is {:?}, but tenant id is missing",
+                    data.claims.scope
+                )
+                .into(),
             ));
         }
 
@@ -3172,7 +3191,7 @@ where
                     .record("tenant_id", field::display(tenant_id))
                     .record("timeline_id", field::display(timeline_id));
 
-                self.check_permission(Some(tenant_id))?;
+                self.check_read_permission(tenant_id)?;
                 let command_kind = match protocol_version {
                     PagestreamProtocolVersion::V2 => ComputeCommandKind::PageStreamV2,
                     PagestreamProtocolVersion::V3 => ComputeCommandKind::PageStreamV3,
@@ -3193,7 +3212,7 @@ where
                     .record("tenant_id", field::display(tenant_id))
                     .record("timeline_id", field::display(timeline_id));
 
-                self.check_permission(Some(tenant_id))?;
+                self.check_read_permission(tenant_id)?;
 
                 COMPUTE_COMMANDS_COUNTERS
                     .for_command(ComputeCommandKind::Basebackup)
@@ -3230,7 +3249,7 @@ where
                     .record("tenant_id", field::display(tenant_id))
                     .record("timeline_id", field::display(timeline_id));
 
-                self.check_permission(Some(tenant_id))?;
+                self.check_read_permission(tenant_id)?;
 
                 COMPUTE_COMMANDS_COUNTERS
                     .for_command(ComputeCommandKind::Fullbackup)
@@ -4082,6 +4101,9 @@ impl proto::PageService for GrpcPageServiceHandler {
         // but the parent shard is removed before the split commits and the compute is notified
         // (which can take several minutes for large tenants). That's also the case for the libpq
         // implementation, so we keep the behavior for now.
+        //
+        // Leases hold back GC, so read-only tokens can't acquire them.
+        check_full_access(&req).map_err(|err| tonic::Status::permission_denied(err.to_string()))?;
         let timeline = self.get_request_timeline(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
 
@@ -4287,7 +4309,7 @@ impl TenantAuthInterceptor {
 }
 
 impl tonic::service::Interceptor for TenantAuthInterceptor {
-    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+    fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         // Do nothing if auth is disabled.
         let Some(auth) = self.auth.as_ref() else {
             return Ok(req);
@@ -4311,14 +4333,26 @@ impl tonic::service::Interceptor for TenantAuthInterceptor {
             .map_err(|err| tonic::Status::invalid_argument(format!("invalid JWT token: {err}")))?;
         let claims = jwtdata.claims;
 
-        // Check if the token is valid for this tenant.
-        check_permission(&claims, Some(tenant_id))
+        // Check if the token is valid for this tenant. All page service RPCs read tenant data, so
+        // read-only tokens are allowed here. RPCs that do more than that must check the stashed
+        // claims for full access, see `check_full_access`.
+        check_read_permission(&claims, tenant_id)
             .map_err(|err| tonic::Status::permission_denied(err.to_string()))?;
 
-        // TODO: consider stashing the claims in the request extensions, if needed.
+        req.extensions_mut().insert(claims);
 
         Ok(req)
     }
+}
+
+/// Checks that a gRPC request authenticated by `TenantAuthInterceptor` has full access to the
+/// tenant, not just read-only access. Does nothing if auth is disabled.
+fn check_full_access(req: &tonic::Request<impl Any>) -> Result<(), AuthError> {
+    let Some(claims) = req.extensions().get::<Claims>() else {
+        return Ok(());
+    };
+    let TenantTimelineId { tenant_id, .. } = *extract::<TenantTimelineId>(req);
+    check_permission(claims, Some(tenant_id))
 }
 
 /// Extracts the given type from the request extensions, or panics if it is missing.

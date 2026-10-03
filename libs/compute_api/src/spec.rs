@@ -470,6 +470,16 @@ pub enum ComputeMode {
     /// Future versions may want to distinguish between replicas with hot standby
     /// feedback and other kinds of replication configurations.
     Replica,
+    /// A read-write node whose changes stay on its local disk: a "local branch".
+    ///
+    /// It starts from the timeline at the given LSN, and reads the pages that it
+    /// hasn't modified from the pageserver at that LSN. It doesn't use safekeepers,
+    /// so a read-only storage token is enough. The LSN must be the end of the
+    /// timeline, typically a new branch that nothing else writes to, so that
+    /// Postgres can start in read-write mode from a basebackup taken there.
+    ///
+    /// The data directory is kept across restarts of the compute.
+    Local(Lsn),
 }
 
 impl ComputeMode {
@@ -480,6 +490,15 @@ impl ComputeMode {
             ComputeMode::Primary => "primary",
             ComputeMode::Static(_) => "static",
             ComputeMode::Replica => "replica",
+            ComputeMode::Local(_) => "local",
+        }
+    }
+
+    /// Does the node accept writes?
+    pub fn is_read_write(&self) -> bool {
+        match self {
+            ComputeMode::Primary | ComputeMode::Local(_) => true,
+            ComputeMode::Static(_) | ComputeMode::Replica => false,
         }
     }
 }

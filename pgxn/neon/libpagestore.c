@@ -52,16 +52,11 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
-enum NeonComputeMode {
-	CP_MODE_PRIMARY = 0,
-	CP_MODE_REPLICA,
-	CP_MODE_STATIC
-};
-
 static const struct config_enum_entry neon_compute_modes[] = {
 	{"primary", CP_MODE_PRIMARY, false},
 	{"replica", CP_MODE_REPLICA, false},
 	{"static", CP_MODE_STATIC, false},
+	{"local", CP_MODE_LOCAL, false},
 	{NULL, 0, false}
 };
 
@@ -80,7 +75,7 @@ int			flush_every_n_requests = 8;
 
 int         neon_protocol_version = 3;
 
-static int	neon_compute_mode = 0;
+int			neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 static int	max_sockets;
@@ -550,6 +545,10 @@ pageserver_connect(shardno_t shard_no, int elevel)
 					break;
 				case CP_MODE_STATIC:
 					strncpy(endpoint_str, "-c neon.compute_mode=static", sizeof(endpoint_str));
+					param_set = true;
+					break;
+				case CP_MODE_LOCAL:
+					strncpy(endpoint_str, "-c neon.compute_mode=local", sizeof(endpoint_str));
 					param_set = true;
 					break;
 			}

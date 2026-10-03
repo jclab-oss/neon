@@ -10,6 +10,7 @@ OBJS = \
 	file_cache.o \
 	hll.o \
 	libpagestore.o \
+	local_branch.o \
 	logical_replication_monitor.o \
 	neon.o \
 	neon_lwlsncache.o \

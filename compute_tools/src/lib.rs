@@ -18,6 +18,7 @@ pub mod disk_quota;
 pub mod extension_server;
 pub mod hadron_metrics;
 pub mod installed_extensions;
+pub mod local_branch;
 pub mod local_proxy;
 pub mod lsn_lease;
 pub mod metrics;

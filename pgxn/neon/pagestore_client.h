@@ -246,6 +246,16 @@ extern int  neon_protocol_version;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 
+/* Values of the neon.compute_mode GUC */
+enum NeonComputeMode {
+	CP_MODE_PRIMARY = 0,
+	CP_MODE_REPLICA,
+	CP_MODE_STATIC,
+	CP_MODE_LOCAL
+};
+
+extern int	neon_compute_mode;
+
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 #if PG_MAJORVERSION_NUM >= 17
@@ -293,6 +303,12 @@ extern int64 neon_dbsize(Oid dbNode);
 extern void neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
 								  BlockNumber blkno, neon_request_lsns *output,
 								  BlockNumber nblocks);
+
+/* Read or prefetch blocks of a permanent relation from the pageserver */
+extern void neon_read_remote(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+							 void **buffers, BlockNumber nblocks);
+extern void neon_prefetch_remote(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+								 int nblocks);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);

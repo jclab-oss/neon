@@ -37,6 +37,10 @@ class AuthKeys:
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
         return self.generate_token(scope=TokenScope.TENANT, tenant_id=str(tenant_id))
 
+    # generate token giving read-only access to only one tenant
+    def generate_tenant_read_only_token(self, tenant_id: TenantId) -> str:
+        return self.generate_token(scope=TokenScope.TENANT_READ_ONLY, tenant_id=str(tenant_id))
+
 
 class TokenScope(StrEnum):
     ADMIN = "admin"
@@ -44,5 +48,6 @@ class TokenScope(StrEnum):
     GENERATIONS_API = "generations_api"
     SAFEKEEPER_DATA = "safekeeperdata"
     TENANT = "tenant"
+    TENANT_READ_ONLY = "tenant_read_only"
     SCRUBBER = "scrubber"
     INFRA = "infra"

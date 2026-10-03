@@ -511,6 +511,7 @@ class NeonLocalCli(AbstractNeonCli):
         allow_multiple=False,
         update_catalog: bool = False,
         privileged_role_name: str | None = None,
+        local_branch: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -536,6 +537,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.append(endpoint_id)
         if hot_standby:
             args.extend(["--hot-standby", "true"])
+        if local_branch:
+            args.append("--local-branch")
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
         if allow_multiple:

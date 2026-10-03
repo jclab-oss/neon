@@ -34,6 +34,7 @@
 #include "communicator_process.h"
 #include "extension_server.h"
 #include "file_cache.h"
+#include "local_branch.h"
 #include "neon.h"
 #include "neon_ddl_handler.h"
 #include "neon_lwlsncache.h"
@@ -629,6 +630,9 @@ _PG_init(void)
 							0,
 							NULL, NULL, NULL);
 
+	/* After the GUCs it checks, and before the shmem requests */
+	pg_init_local_branch();
+
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the
@@ -833,6 +837,7 @@ neon_shmem_request_hook(void)
 	RelsizeCacheShmemRequest();
 	WalproposerShmemRequest();
 	LwLsnCacheShmemRequest();
+	LocalBranchShmemRequest();
 }
 
 
@@ -858,6 +863,7 @@ neon_shmem_startup_hook(void)
 	RelsizeCacheShmemInit();
 	WalproposerShmemInit();
 	LwLsnCacheShmemInit();
+	LocalBranchShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
