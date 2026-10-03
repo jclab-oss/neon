@@ -56,7 +56,7 @@ def local_map_stats(endpoint: Endpoint) -> LocalMapStats:
     """
     stats = LocalMapStats()
     assert endpoint.pgdata_dir is not None
-    for path in (endpoint.pgdata_dir / "base").glob("*/*.localmap"):
+    for path in (endpoint.pgdata_dir / "base").glob("*/*.4294967295"):
         content = path.read_bytes()
         magic, version, flags, remote_nblocks = struct.unpack("<IIII", content[:16])
         assert (magic, version) == (0x4E4C4D31, 1)
@@ -379,3 +379,53 @@ def test_local_branch_sharded(neon_env_builder: NeonEnvBuilder, grpc: bool):
         ("main", 10000),
     ]
     assert main.safe_psql("SELECT val, count(*) FROM t GROUP BY val") == [("main", 20000)]
+
+
+def test_local_branch_lost_writes(neon_simple_env: NeonEnv):
+    """
+    Pages from the pageserver that were written locally for the first time since
+    the last checkpoint are restored by WAL replay, even if their data was lost
+    in a crash, e.g. a power failure, while their bits in the map were not.
+    """
+    env = neon_simple_env
+    main = env.endpoints.create_start("main")
+    main.safe_psql("CREATE TABLE t (id int PRIMARY KEY, val int)")
+    main.safe_psql("INSERT INTO t SELECT g, 0 FROM generate_series(1, 50000) g")
+    main.safe_psql("CREATE TABLE vacuumed (id int) WITH (autovacuum_enabled = off)")
+    main.safe_psql("INSERT INTO vacuumed SELECT generate_series(1, 50000)")
+    create_anchor_branch(env, "anchor", main)
+
+    local = env.endpoints.create_start("anchor", local_branch=True)
+    relfilenodes = [
+        local.safe_psql(f"SELECT pg_relation_filepath('{table}')")[0][0]
+        for table in ["t", "vacuumed"]
+    ]
+    local.safe_psql("CHECKPOINT")
+    # Modify all pages of the table, which evicts most of them.
+    local.safe_psql("UPDATE t SET val = 1")
+    local.safe_psql("INSERT INTO t SELECT g, 2 FROM generate_series(50001, 60000) g")
+    # Set hint bits and the all-visible flag, without WAL-logging the pages
+    local.safe_psql("VACUUM vacuumed")
+    assert local_map_stats(local).local_blocks > 0
+    local.stop(mode="immediate")
+
+    # Lose everything written to the tables' files since the checkpoint, but keep
+    # the map files, as if they had been flushed to disk and the data hadn't.
+    assert local.pgdata_dir is not None
+    for relfilenode in relfilenodes:
+        for fork in ["", "_fsm", "_vm"]:
+            path = local.pgdata_dir / f"{relfilenode}{fork}"
+            if path.exists():
+                size = path.stat().st_size
+                with open(path, "r+b") as f:
+                    f.write(b"\0" * size)
+
+    local.start()
+    assert local.safe_psql("SELECT val, count(*) FROM t GROUP BY val ORDER BY val") == [
+        (1, 50000),
+        (2, 10000),
+    ]
+    assert local.safe_psql("SELECT count(*) FROM vacuumed") == [(50000,)]
+    assert local.safe_psql("SET enable_seqscan = off; SELECT count(*) FROM t WHERE id > 0") == [
+        (60000,)
+    ]

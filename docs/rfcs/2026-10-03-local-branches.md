@@ -98,9 +98,10 @@ too (see `pgxn/neon/local_branch.c` for the details):
 
 - For each relation fork that the branch modified, a data file at the path where
   md.c would store the fork's first segment holds the locally written blocks, all
-  in one file, and a `.localmap` file next to it records whether the fork exists,
-  how many of its blocks come from the pageserver, and a bitmap of which of those
-  have been written locally.
+  in one file, and a map file next to it (stored as a segment that md.c never
+  uses, so that the md.c sync handler can fsync it) records whether the fork
+  exists, how many of its blocks come from the pageserver, and a bitmap of which
+  of those have been written locally.
 - Reads of blocks that haven't been written locally go to the pageserver (and the
   LFC and the prefetch machinery), always at the local branch LSN. Other reads,
   writes, extensions and truncations use the local files.
@@ -121,20 +122,24 @@ too (see `pgxn/neon/local_branch.c` for the details):
 
 ### Reliability, failure modes and corner cases
 
-Data files are fsync'd at checkpoints, via sync requests to the md.c sync handler,
-which finds them by their md.c path. WAL replay restores pages written after the
-last checkpoint from full-page images. The first local write of a block that came
-from the pageserver is special: its bit in the map file must not become durable
-before the data, or a crash could leave a hole where the pageserver's version of
-the page used to be, which nothing in the WAL would restore if only hint bits had
-changed. So that write fsyncs the data file before setting the bit. All map file
-changes are durable immediately.
+Data files and map file bitmaps are fsync'd at checkpoints, via sync requests to
+the md.c sync handler, which finds them by their md.c path. WAL replay restores
+pages written after the last checkpoint from full-page images, like in vanilla
+Postgres. The first local write of a block that came from the pageserver is
+special: a crash must not leave its bit in the map file set without its data,
+which would leave a hole where the pageserver's version of the page used to be.
+That's fine as long as WAL replay restores the page from a full-page image without
+reading it, which is the case if the page has been WAL-logged since the redo
+pointer of the checkpoint that recovery starts from. Otherwise, the write
+WAL-logs a full-page image first. During recovery, when that's not possible, it
+fsyncs the data before setting the bit, and the map file. Pages that only differ
+from the pageserver's version in hint bits aren't written at all.
 
-Protection against torn pages relies on every change to a page after a
-checkpoint's redo pointer being preceded by a full-page image of it. Neon's
-Postgres advances the page LSN when VACUUM sets the all-visible flag, without a
-full-page image unless hint bits are WAL-logged, so a local branch runs with
-`wal_log_hints=on`.
+That reasoning, and Postgres's protection against torn pages in general, relies
+on every change to a page after a checkpoint's redo pointer being preceded by a
+full-page image of it. Neon's Postgres advances the page LSN when VACUUM sets the
+all-visible flag, without a full-page image unless hint bits are WAL-logged, so a
+local branch runs with `wal_log_hints=on`.
 
 `smgrtruncate()` is called in a critical section, so the truncate path doesn't do
 network I/O, and allocates memory in a context that allows it.
@@ -154,16 +159,14 @@ tenant.
 
 ### Performance
 
-Pages that the branch hasn't modified are read like in any other compute. The
-first local write of a page that came from the pageserver costs two fsyncs (the
-data, then the map file), which makes write-heavy workloads that touch many such
-pages slower; later writes of the same page don't. Commits wait for a local WAL
-fsync instead of the safekeepers.
+Pages that the branch hasn't modified are read like in any other compute, and
+pages it has modified are read from local disk. Writes are synced at checkpoints,
+like in vanilla Postgres, and commits wait for a local WAL fsync instead of the
+safekeepers. `wal_log_hints` adds full-page images when hint bits are set on a
+page for the first time after a checkpoint, like data checksums do.
 
 ### Future work
 
-- Batch the fsyncs of first writes, e.g. by WAL-logging a full-page image of the
-  page before its first local write, and syncing the map files at checkpoints.
 - Cache the map files' state, instead of reading it on each I/O.
 
 ## Control plane contract

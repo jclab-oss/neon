@@ -22,10 +22,11 @@
  *   one file, block N at offset N * BLCKSZ. Blocks that haven't been written
  *   locally are holes.
  *
- * - The map file, at the same path with a ".localmap" suffix. It records
- *   whether the fork exists, how many blocks of it come from the pageserver
- *   ('remote_nblocks'), and a bitmap of which of those blocks have been
- *   written locally. A block below 'remote_nblocks' is read from the data file
+ * - The map file, at the path where md.c would store segment LOCAL_MAP_SEGNO
+ *   of the fork (e.g. "base/5/16384.4294967295"), which it never uses. It
+ *   records whether the fork exists, how many blocks of it come from the
+ *   pageserver ('remote_nblocks'), and a bitmap of which of those blocks have
+ *   been written locally. A block below 'remote_nblocks' is read from the data file
  *   if its bit is set, and from the pageserver otherwise. Blocks at or above
  *   'remote_nblocks' are always read from the data file. The size of the fork
  *   is the larger of 'remote_nblocks' and the size of the data file.
@@ -45,22 +46,21 @@
  * Durability
  * ----------
  *
- * The data files are fsync'd at checkpoints, like md.c files: we register
- * sync requests with the md.c sync handler, which finds the files by their
- * md.c path. That is enough for blocks that have been written locally before.
- * If we crash before the next checkpoint, WAL replay restores them from
+ * The data files and the bitmaps in the map files are fsync'd at checkpoints,
+ * like md.c files: we register sync requests with the md.c sync handler,
+ * which finds the files by their md.c path. If we crash before the next
+ * checkpoint, WAL replay restores the pages written since the last one from
  * full-page images, so full_page_writes must be on. And so must wal_log_hints:
  * Neon's Postgres advances the page LSN when it sets the all-visible flag, and
  * without wal_log_hints, it doesn't WAL-log a full-page image for that, so the
  * page's later changes until the next checkpoint wouldn't have one either.
  *
  * The first local write of a block that comes from the pageserver needs more
- * care. If its bit in the map file became durable before the data, a crash
- * could leave a hole in the data file where the pageserver's version of the
- * page used to be, and if only hint bits had been changed, nothing in the WAL
- * would restore the page. So on the first write of such a block, we fsync the
- * data file before setting the bit. Changes to the map files are always made
- * durable immediately.
+ * care: a crash must not leave the block marked in the map without its data,
+ * which would leave a hole where the pageserver's version of the page used to
+ * be. See local_branch_write() for how we make sure that WAL replay restores
+ * the page in that case. Other changes to the map files are made durable
+ * immediately.
  *
  * Map file updates are serialized by a small array of LWLocks, partitioned
  * by relation fork. Reads don't need locking: the buffer manager guarantees
@@ -77,12 +77,15 @@
 #include <unistd.h>
 
 #include "access/xlog.h"
+#include "access/xlog_internal.h"
+#include "access/xloginsert.h"
 #include "catalog/pg_tablespace_d.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
 #include "port/pg_iovec.h"
+#include "storage/bufpage.h"
 #include "storage/fd.h"
 #include "storage/lwlock.h"
 #include "storage/md.h"
@@ -103,7 +106,12 @@ XLogRecPtr	local_branch_lsn = InvalidXLogRecPtr;
 
 static char *local_branch_lsn_str = "";
 
-#define LOCAL_MAP_SUFFIX ".localmap"
+/*
+ * The map file of a fork is stored where md.c would store this segment of the
+ * fork, which it never uses. That way, the md.c sync handler can fsync map
+ * files at checkpoints, like the data files.
+ */
+#define LOCAL_MAP_SEGNO InvalidBlockNumber
 #define LOCAL_MAP_MAGIC 0x4e4c4d31	/* "NLM1" */
 #define LOCAL_MAP_VERSION 1
 /* The bitmap starts at this offset, so that the header fits in one sector */
@@ -304,10 +312,66 @@ static char *
 local_map_path(NRelFileInfo rinfo, ForkNumber forknum)
 {
 	char	   *datapath = relpathperm(rinfo, forknum);
-	char	   *path = psprintf("%s" LOCAL_MAP_SUFFIX, datapath);
+	char	   *path = psprintf("%s.%u", datapath, LOCAL_MAP_SEGNO);
 
 	pfree(datapath);
 	return path;
+}
+
+static void
+local_file_tag(FileTag *tag, NRelFileInfo rinfo, ForkNumber forknum, BlockNumber segno)
+{
+	memset(tag, 0, sizeof(*tag));
+	tag->handler = SYNC_HANDLER_MD;
+	tag->forknum = forknum;
+#if PG_MAJORVERSION_NUM >= 16
+	tag->rlocator = rinfo;
+#else
+	tag->rnode = rinfo;
+#endif
+	tag->segno = segno;
+}
+
+/*
+ * Ask the checkpointer to fsync a data file (segno 0) or map file
+ * (LOCAL_MAP_SEGNO) at the next checkpoint. The md.c sync handler finds them by
+ * their path.
+ */
+static void
+local_register_sync(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber segno)
+{
+	FileTag		tag;
+
+	local_file_tag(&tag, rinfo, forknum, segno);
+	if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false /* retryOnError */ ))
+	{
+		char	   *path;
+		int			fd;
+
+		ereport(DEBUG1,
+				(errmsg_internal("could not forward fsync request because request queue is full")));
+
+		path = segno == LOCAL_MAP_SEGNO ? local_map_path(rinfo, forknum) : relpathperm(rinfo, forknum);
+		fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+		if (fd < 0)
+		{
+			if (errno != ENOENT)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not open file \"%s\": %m", path)));
+		}
+		else
+		{
+			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_SYNC);
+			if (pg_fsync(fd) != 0)
+				ereport(data_sync_elevel(ERROR),
+						(errcode_for_file_access(),
+						 errmsg("could not fsync file \"%s\": %m", path)));
+			pgstat_report_wait_end();
+			CloseTransientFile(fd);
+		}
+		pfree(path);
+	}
 }
 
 static LWLock *
@@ -474,6 +538,11 @@ static void
 local_map_remove(NRelFileInfo rinfo, ForkNumber forknum, int elevel)
 {
 	char	   *path = local_map_path(rinfo, forknum);
+	FileTag		tag;
+
+	/* Like mdunlinkfork(), forget any pending fsync of the file first */
+	local_file_tag(&tag, rinfo, forknum, LOCAL_MAP_SEGNO);
+	RegisterSyncRequest(&tag, SYNC_FORGET_REQUEST, true /* retryOnError */ );
 
 	if (unlink(path) == 0)
 	{
@@ -632,12 +701,13 @@ local_map_get_local_blocks(NRelFileInfo rinfo, ForkNumber forknum,
 }
 
 /*
- * Durably mark blocks of a remote-backed fork as stored locally. The data must
- * already be durable.
+ * Mark blocks of a remote-backed fork as stored locally. If 'sync' is set,
+ * the change is durable on return, otherwise at the next checkpoint.
  */
 static void
 local_map_mark_local_blocks(NRelFileInfo rinfo, ForkNumber forknum,
-							BlockNumber blkno, BlockNumber nblocks, const bits8 *mark)
+							BlockNumber blkno, BlockNumber nblocks, const bits8 *mark,
+							bool sync)
 {
 	LWLock	   *lock = local_map_lock(rinfo, forknum);
 	BlockNumber first = InvalidBlockNumber;
@@ -704,12 +774,15 @@ local_map_mark_local_blocks(NRelFileInfo rinfo, ForkNumber forknum,
 	}
 	pgstat_report_wait_end();
 
-	pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_SYNC);
-	if (pg_fsync(fd) != 0)
-		ereport(data_sync_elevel(ERROR),
-				(errcode_for_file_access(),
-				 errmsg("could not fsync file \"%s\": %m", path)));
-	pgstat_report_wait_end();
+	if (sync)
+	{
+		pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_SYNC);
+		if (pg_fsync(fd) != 0)
+			ereport(data_sync_elevel(ERROR),
+					(errcode_for_file_access(),
+					 errmsg("could not fsync file \"%s\": %m", path)));
+		pgstat_report_wait_end();
+	}
 
 	if (CloseTransientFile(fd) != 0)
 		ereport(ERROR,
@@ -718,6 +791,9 @@ local_map_mark_local_blocks(NRelFileInfo rinfo, ForkNumber forknum,
 
 	LWLockRelease(lock);
 	pfree(path);
+
+	if (!sync)
+		local_register_sync(rinfo, forknum, LOCAL_MAP_SEGNO);
 }
 
 /*
@@ -830,42 +906,10 @@ local_data_nblocks(NRelFileInfo rinfo, ForkNumber forknum)
 	return nblocks;
 }
 
-/*
- * Ask the checkpointer to fsync the data file at the next checkpoint. The md.c
- * sync handler finds it at the path of the first segment of the fork.
- */
 static void
 local_data_register_sync(NRelFileInfo rinfo, ForkNumber forknum)
 {
-	FileTag		tag;
-
-	memset(&tag, 0, sizeof(tag));
-	tag.handler = SYNC_HANDLER_MD;
-	tag.forknum = forknum;
-#if PG_MAJORVERSION_NUM >= 16
-	tag.rlocator = rinfo;
-#else
-	tag.rnode = rinfo;
-#endif
-	tag.segno = 0;
-
-	if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false /* retryOnError */ ))
-	{
-		char	   *path;
-		int			fd;
-
-		ereport(DEBUG1,
-				(errmsg_internal("could not forward fsync request because request queue is full")));
-
-		fd = local_data_open(rinfo, forknum, O_RDWR, &path);
-		if (fd >= 0)
-		{
-			local_data_fsync(fd, path);
-			local_data_close(fd, path);
-		}
-		else
-			pfree(path);
-	}
+	local_register_sync(rinfo, forknum, 0);
 }
 
 static void
@@ -913,12 +957,13 @@ local_data_read(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 }
 
 /*
- * Write blocks to the data file. If 'sync' is set, they are durable on
- * return.
+ * Write the blocks marked in 'mask' to the data file. If 'sync' is set, they
+ * are durable on return.
  */
 static void
 local_data_write(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
-				 const void **buffers, BlockNumber nblocks, bool sync)
+				 const void **buffers, BlockNumber nblocks, const bits8 *mask,
+				 bool sync)
 {
 	char	   *path;
 	int			fd;
@@ -934,6 +979,9 @@ local_data_write(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	for (BlockNumber i = 0; i < nblocks; i++)
 	{
+		if (!BITMAP_ISSET(mask, i))
+			continue;
+
 		errno = 0;
 		pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_WRITE);
 		if (pg_pwrite(fd, buffers[i], BLCKSZ, (off_t) (blkno + i) * BLCKSZ) != BLCKSZ)
@@ -1279,46 +1327,174 @@ local_branch_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	}
 }
 
-void
-local_branch_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
-					const void **buffers, BlockNumber nblocks, bool skipFsync)
+/*
+ * Can we skip writing a page that came from the pageserver? A main fork page
+ * whose LSN isn't newer than the local branch LSN hasn't been modified by the
+ * branch's WAL, so it only differs from the pageserver's version in hint bits,
+ * which are OK to lose. Except for PD_ALL_VISIBLE: unless hint bits are
+ * WAL-logged, setting it doesn't advance the page LSN, but the visibility map
+ * bit that goes with it is WAL-logged.
+ */
+static bool
+local_write_skippable(ForkNumber forknum, const void *page)
+{
+	return forknum == MAIN_FORKNUM &&
+		PageGetLSN((Page) page) <= local_branch_lsn &&
+		!PageIsAllVisible((Page) page);
+}
+
+/*
+ * Crash recovery restores a page from a full-page image if the page's LSN is
+ * newer than this, see local_branch_write().
+ */
+static XLogRecPtr
+local_fpi_horizon(void)
+{
+	XLogRecPtr	redo;
+	TimeLineID	tli;
+
+	/*
+	 * During a checkpoint, the checkpointer writes pages before it syncs the
+	 * files, so whatever it writes is durable once the checkpoint completes.
+	 * Until then, crash recovery starts from the previous checkpoint.
+	 */
+	if (AmCheckpointerProcess())
+	{
+		GetOldestRestartPoint(&redo, &tli);
+		return redo;
+	}
+
+	/*
+	 * Other processes might write after the checkpoint in progress has synced
+	 * the files, so assume that it completes before the write is durable.
+	 */
+	return GetRedoRecPtr();
+}
+
+/*
+ * Write blocks, all below the end of the fork (writev), or at or beyond it
+ * (extend).
+ *
+ * The first local write of a block from the pageserver marks it in the map
+ * file. A crash must not leave it marked unless the data is durable: if only
+ * hint bits had changed, there would be no WAL to restore it from. So either
+ * WAL replay restores the block from a full-page image, or the data is made
+ * durable before the map:
+ *
+ * - If the page's LSN is newer than the redo pointer of the checkpoint that
+ *   crash recovery would start from, its first change after that redo pointer
+ *   included a full-page image, which is already flushed (WAL before data).
+ *   And once the next checkpoint completes, the data and the map are synced.
+ *   That needs wal_log_hints, though: Neon's Postgres advances the page LSN
+ *   when it sets the all-visible flag, without a full-page image unless hint
+ *   bits are WAL-logged.
+ *
+ * - Otherwise, we WAL-log a full-page image now.
+ *
+ * - If we can't write WAL (during recovery), we fsync the data before marking
+ *   it in the map, and fsync the map.
+ *
+ * Pages that only differ from the pageserver's version in hint bits aren't
+ * written at all, see local_write_skippable().
+ */
+static void
+local_branch_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+				   const void **buffers, BlockNumber nblocks, bool skipFsync,
+				   bool extend)
 {
 	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
 	LocalForkMeta meta;
 	bits8		local[PG_IOV_MAX / 8];
+	bits8		to_write[PG_IOV_MAX / 8];
 	bits8		first_writes[PG_IOV_MAX / 8];
+	bool		any_to_write = false;
 	bool		any_first_writes = false;
+	bool		sync = false;
+	XLogRecPtr	horizon = InvalidXLogRecPtr;
+	XLogRecPtr	fpi_lsn = InvalidXLogRecPtr;
+
+	Assert(nblocks <= PG_IOV_MAX);
+
+	/* Don't bother creating a map file if there's nothing to write */
+	if (!extend && forknum == MAIN_FORKNUM &&
+		local_fork_lookup(rinfo, forknum, &meta) == LB_REMOTE)
+	{
+		bool		all_skippable = true;
+
+		for (BlockNumber i = 0; i < nblocks && all_skippable; i++)
+			all_skippable = local_write_skippable(forknum, buffers[i]);
+		if (all_skippable)
+			return;
+	}
 
 	local_fork_for_write(reln, forknum, &meta, InvalidBlockNumber);
 
 	/* Which blocks from the pageserver are written locally for the first time? */
 	local_map_get_local_blocks(rinfo, forknum, &meta, blkno, nblocks, local);
+	memset(to_write, 0, sizeof(to_write));
 	memset(first_writes, 0, sizeof(first_writes));
 	for (BlockNumber i = 0; i < nblocks; i++)
 	{
-		if (!BITMAP_ISSET(local, i))
+		XLogRecPtr	lsn;
+
+		if (BITMAP_ISSET(local, i))
 		{
-			BITMAP_SET(first_writes, i);
-			any_first_writes = true;
+			BITMAP_SET(to_write, i);
+			any_to_write = true;
+			continue;
 		}
+		if (local_write_skippable(forknum, buffers[i]))
+			continue;
+
+		BITMAP_SET(to_write, i);
+		BITMAP_SET(first_writes, i);
+		any_to_write = true;
+		any_first_writes = true;
+
+		if (sync)
+			continue;
+		if (horizon == InvalidXLogRecPtr)
+			horizon = local_fpi_horizon();
+		lsn = PageGetLSN((Page) buffers[i]);
+		if (lsn > horizon && fullPageWrites && XLogHintBitIsNeeded())
+			continue;
+		if (XLogInsertAllowed() && fullPageWrites)
+		{
+			PGIOAlignedBlock copy;
+
+			/* The page may be share-locked, see XLogSaveBufferForHint() */
+			memcpy(copy.data, buffers[i], BLCKSZ);
+			lsn = log_newpage(&rinfo, forknum, blkno + i, copy.data, false);
+			fpi_lsn = Max(fpi_lsn, lsn);
+		}
+		else
+			sync = true;
 	}
 
-	/*
-	 * Before the first writes are marked in the map, the data must be durable,
-	 * see the comment at the top of the file.
-	 */
-	local_data_write(rinfo, forknum, blkno, buffers, nblocks, any_first_writes);
+	if (!any_to_write)
+		return;
+	if (fpi_lsn != InvalidXLogRecPtr && !sync)
+		XLogFlush(fpi_lsn);
+
+	local_data_write(rinfo, forknum, blkno, buffers, nblocks, to_write, sync);
 	if (any_first_writes)
-		local_map_mark_local_blocks(rinfo, forknum, blkno, nblocks, first_writes);
-	else if (!skipFsync)
+		local_map_mark_local_blocks(rinfo, forknum, blkno, nblocks, first_writes, sync);
+	if (!sync && !skipFsync)
 		local_data_register_sync(rinfo, forknum);
+}
+
+void
+local_branch_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+					const void **buffers, BlockNumber nblocks, bool skipFsync)
+{
+	local_branch_write(reln, forknum, blkno, buffers, nblocks, skipFsync, false);
 }
 
 void
 local_branch_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 					const void *buffer, bool skipFsync)
 {
-	local_branch_writev(reln, forknum, blkno, &buffer, 1, skipFsync);
+	local_branch_write(reln, forknum, blkno, &buffer, 1, skipFsync, true);
 
 	/*
 	 * The blocks between the old end of the relation and blkno, if any, are
@@ -1466,6 +1642,16 @@ local_branch_immedsync(SMgrRelation reln, ForkNumber forknum)
 	}
 	local_data_fsync(fd, path);
 	local_data_close(fd, path);
+
+	/* The map might have unsynced changes too */
+	path = local_map_path(InfoFromSMgrRel(reln), forknum);
+	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+	if (fd >= 0)
+	{
+		local_data_fsync(fd, path);
+		CloseTransientFile(fd);
+	}
+	pfree(path);
 }
 
 void
@@ -1477,6 +1663,9 @@ local_branch_registersync(SMgrRelation reln, ForkNumber forknum)
 
 	/* Nothing to sync if nothing was written locally */
 	if (stat(path, &st) == 0)
+	{
 		local_data_register_sync(rinfo, forknum);
+		local_register_sync(rinfo, forknum, LOCAL_MAP_SEGNO);
+	}
 	pfree(path);
 }
