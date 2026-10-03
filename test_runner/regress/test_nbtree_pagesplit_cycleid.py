@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 
@@ -31,11 +32,20 @@ BTREE_NUM_CYCLEID_PAGES = """
     """
 
 
+def reusable_index_pages(vacuum_verbose_notices: list[str], index: str) -> int:
+    for notice in vacuum_verbose_notices:
+        # v14 words it as "..., of which N are currently reusable."
+        if m := re.search(rf'index "{index}".*?(\d+) (?:are currently )?reusable', notice, re.S):
+            return int(m.group(1))
+    return 0
+
+
 def test_nbtree_pagesplit_cycleid(neon_simple_env: NeonEnv):
     env = neon_simple_env
     endpoint = env.endpoints.create_start("main")
 
-    ses1 = endpoint.connect().cursor()
+    conn1 = endpoint.connect()
+    ses1 = conn1.cursor()
     ses1.execute("ALTER SYSTEM SET autovacuum = off;")
     ses1.execute("ALTER SYSTEM SET enable_seqscan = off;")
     ses1.execute("ALTER SYSTEM SET full_page_writes = off;")
@@ -60,7 +70,19 @@ def test_nbtree_pagesplit_cycleid(neon_simple_env: NeonEnv):
     # Do another delete-then-indexcleanup cycle, to move the pages from
     # "dead" to "reusable"
     ses1.execute("DELETE FROM t WHERE id <= 446;")
-    ses1.execute("VACUUM (FREEZE, INDEX_CLEANUP ON) t;")
+    # That needs both VACUUMs to see the preceding DELETE as committed for
+    # everyone. A snapshot taken during a DELETE, e.g. by compute_ctl's
+    # monitoring queries, holds back VACUUM's removable cutoff, so the page may
+    # get deleted only by the second VACUUM, which can't recycle it yet. In that
+    # case, advance the XID horizon, and VACUUM until the page is reusable.
+    for _ in range(10):
+        conn1.notices.clear()
+        ses1.execute("VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP ON) t;")
+        if reusable_index_pages(conn1.notices, "t_uidx") > 0:
+            break
+        ses1.execute("SELECT pg_current_xact_id();")
+    else:
+        raise AssertionError("the deleted index page never became reusable")
 
     # Make sure the vacuum we're about to trigger in s3 has cleanup work to do
     ses1.execute("DELETE FROM t WHERE id <= 610;")

@@ -547,6 +547,10 @@ class NeonEnvBuilder:
             assert self.compatibility_pg_distrib_dir is not None, (
                 "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
             )
+            # A previous release that predates this Postgres version can't run it: neither its
+            # compute, nor its storage components, which reject the unknown version.
+            if not (self.compatibility_pg_distrib_dir / self.pg_version.v_prefixed).is_dir():
+                pytest.skip(f"the previous release doesn't support Postgres {self.pg_version}")
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
             self.test_may_use_compatibility_snapshot_binaries = True
