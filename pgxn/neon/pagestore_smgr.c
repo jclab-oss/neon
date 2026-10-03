@@ -162,7 +162,13 @@ log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 					 page_std);
 	}
 
-	return ProcLastRecPtr;
+	/*
+	 * Return the end of the last record, like log_newpage() does. Not
+	 * ProcLastRecPtr, the start of that record: the page server only has the
+	 * image at the end LSN, so a later read of the page at the start LSN
+	 * would get the previous version.
+	 */
+	return XactLastRecEnd;
 }
 #endif /* PG_MAJORVERSION_NUM >= 17 */
 
