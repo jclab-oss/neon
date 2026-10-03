@@ -7,11 +7,21 @@
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "storage/ipc.h"
+#include "storage/lwlock.h"
 #include "storage/shmem.h"
 #include "storage/buf_internals.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 
+/*
+ * Newer Neon Postgres branches (REL_17_STABLE_neon and later) no longer have
+ * a built-in LastWrittenLsnLock, so allocate it ourselves in that case.
+ */
+#ifndef LastWrittenLsnLock
+#define NEON_LWLSN_OWN_LOCK
+static LWLock *lwlsn_lock;
+#define LastWrittenLsnLock lwlsn_lock
+#endif
 
 
 typedef struct LastWrittenLsnCacheEntry
@@ -75,9 +85,11 @@ static XLogRecPtr SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 
 
 /* These hold the set_lwlsn_* hooks which were installed before ours, if any */
+#if PG_MAJORVERSION_NUM < 17
 static set_lwlsn_block_range_hook_type prev_set_lwlsn_block_range_hook = NULL;
 static set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
 static set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
+#endif
 static set_max_lwlsn_hook_type prev_set_max_lwlsn_hook = NULL;
 static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
 static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
@@ -92,12 +104,18 @@ init_lwlsncache(void)
 	
 	lwlc_register_gucs();
 
+	/*
+	 * The set_lwlsn_block* hooks were removed from REL_17_STABLE_neon; the
+	 * smgr code calls neon_set_lwlsn_block*() directly.
+	 */
+#if PG_MAJORVERSION_NUM < 17
 	prev_set_lwlsn_block_range_hook = set_lwlsn_block_range_hook;
 	set_lwlsn_block_range_hook = neon_set_lwlsn_block_range;
 	prev_set_lwlsn_block_v_hook = set_lwlsn_block_v_hook;
 	set_lwlsn_block_v_hook = neon_set_lwlsn_block_v;
 	prev_set_lwlsn_block_hook = set_lwlsn_block_hook;
 	set_lwlsn_block_hook = neon_set_lwlsn_block;
+#endif
 	prev_set_max_lwlsn_hook = set_max_lwlsn_hook;
 	set_max_lwlsn_hook = neon_set_max_lwlsn;
 	prev_set_lwlsn_relation_hook = set_lwlsn_relation_hook;
@@ -115,6 +133,10 @@ LwLsnCacheShmemRequest(void)
 	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
 
 	RequestAddinShmemSpace(requested_size);
+
+#ifdef NEON_LWLSN_OWN_LOCK
+	RequestNamedLWLockTranche("neon_lwlsn", 1);
+#endif
 }
 
 void
@@ -122,6 +144,11 @@ LwLsnCacheShmemInit(void)
 {
 	static HASHCTL info;
 	bool found;
+
+#ifdef NEON_LWLSN_OWN_LOCK
+	lwlsn_lock = &GetNamedLWLockTranche("neon_lwlsn")->lock;
+#endif
+
 	if (lwlsn_cache_size > 0)
 	{
 		info.keysize = sizeof(BufferTag);

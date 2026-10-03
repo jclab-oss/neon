@@ -27,6 +27,7 @@
 #include "pgstat.h"
 #include "portability/instr_time.h"
 #include "postmaster/interrupt.h"
+#include "replication/walreceiver.h"
 #include "storage/buf_internals.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -1463,6 +1464,19 @@ PagestoreShmemRequest(void)
 	RequestAddinShmemSpace(sizeof(PagestoreShmemState));
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+/*
+ * GetWalRcvPassword_hook: supply the storage auth token as the password
+ * when the walreceiver connects to the safekeepers. The caller pfree()s
+ * the result.
+ */
+static char *
+neon_get_walrcv_password(void)
+{
+	return neon_auth_token ? pstrdup(neon_auth_token) : NULL;
+}
+#endif
+
 /*
  * Module initialization function
  */
@@ -1643,12 +1657,20 @@ pg_init_libpagestore(void)
 	if (neon_auth_token)
 		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
 
+#if PG_MAJORVERSION_NUM >= 17
+	/* Replicas use the same token to stream WAL from the safekeepers */
+	GetWalRcvPassword_hook = neon_get_walrcv_password;
+#endif
+
 	if (pageserver_connstring[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
+#if PG_MAJORVERSION_NUM >= 17
+		read_slru_segment_hook = neon_download_slru_segment;
+#endif
 	}
 
 	memset(page_servers, 0, sizeof(page_servers));

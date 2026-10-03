@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::walingest::{WalIngestError, WalIngestErrorKind};
 use crate::{PERF_TRACE_TARGET, ensure_walingest};
 use anyhow::Context;
+use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use pageserver_api::key::{
@@ -26,7 +27,7 @@ use pageserver_api::keyspace::{KeySpaceRandomAccum, SparseKeySpace};
 use pageserver_api::models::RelSizeMigration;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::{BLCKSZ, PgMajorVersion, TransactionId};
+use postgres_ffi::{BLCKSZ, PgMajorVersion, TransactionId, dispatch_pgversion, pg_constants};
 use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi_types::{Oid, RepOriginId, TimestampTz};
 use serde::{Deserialize, Serialize};
@@ -906,6 +907,14 @@ impl Timeline {
                 .map_err(|_| PageReconstructError::Cancelled)?,
         );
 
+        let next_multixact_offset = if kind == SlruKind::MultiXactOffsets {
+            let checkpoint = self.get_checkpoint(lsn, ctx).await?;
+            NextMultiXactOffset::from_checkpoint(self.pg_version, &checkpoint)
+                .map_err(|e| PageReconstructError::Other(e.into()))?
+        } else {
+            None
+        };
+
         let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
         for batch in batches.parts {
             let query = VersionedKeySpaceQuery::uniform(batch, lsn);
@@ -913,9 +922,15 @@ impl Timeline {
                 .get_vectored(query, io_concurrency.clone(), ctx)
                 .await?;
 
-            for (_key, block) in blocks {
+            for (key, block) in blocks {
                 let block = block?;
+                let start = segment.len();
                 segment.extend_from_slice(&block[..BLCKSZ as usize]);
+                if let Some(fixup) = &next_multixact_offset {
+                    let (kind, segno, blknum) =
+                        key.to_slru_block().map_err(PageReconstructError::Other)?;
+                    fixup.apply(kind, segno, blknum, &mut segment[start..]);
+                }
             }
         }
 
@@ -2006,6 +2021,48 @@ impl DatadirModification<'_> {
         Ok(())
     }
 
+    /// Like put_slru_wal_record(), but at an LSN before the current record's
+    /// end LSN, for when ingesting one WAL record updates the same SLRU page
+    /// twice. Two writes to the same key at the same LSN would replace each
+    /// other. 'lsn' must still be after the previous record, so that any
+    /// reader at a record boundary sees both writes.
+    pub fn put_slru_wal_record_at(
+        &mut self,
+        lsn: Lsn,
+        kind: SlruKind,
+        segno: u32,
+        blknum: BlockNumber,
+        rec: NeonWalRecord,
+    ) -> Result<(), WalIngestError> {
+        if !self.tline.tenant_shard_id.is_shard_zero() {
+            return Ok(());
+        }
+
+        self.put_data_at(
+            slru_block_to_key(kind, segno, blknum),
+            Value::WalRecord(rec),
+            lsn,
+        )
+    }
+
+    /// Like put_slru_page_image(), but at an earlier LSN, see put_slru_wal_record_at().
+    pub fn put_slru_page_image_at(
+        &mut self,
+        lsn: Lsn,
+        kind: SlruKind,
+        segno: u32,
+        blknum: BlockNumber,
+        img: Bytes,
+    ) -> Result<(), WalIngestError> {
+        assert!(self.tline.tenant_shard_id.is_shard_zero());
+
+        let key = slru_block_to_key(kind, segno, blknum);
+        if !key.is_valid_key_on_write_path() {
+            Err(WalIngestErrorKind::InvalidKey(key, lsn))?;
+        }
+        self.put_data_at(key, Value::Image(img), lsn)
+    }
+
     /// Like put_wal_record, but with ready-made image of the page.
     pub fn put_rel_page_image(
         &mut self,
@@ -3041,6 +3098,26 @@ impl DatadirModification<'_> {
         batch.put(key, val, self.lsn);
     }
 
+    fn put_data_at(&mut self, key: Key, val: Value, lsn: Lsn) -> Result<(), WalIngestError> {
+        assert!(Self::is_data_key(&key));
+        let prev_lsn = Lsn::max(
+            self.pending_lsns.last().copied().unwrap_or(Lsn(0)),
+            self.tline.get_last_record_lsn(),
+        );
+        ensure_walingest!(
+            lsn <= self.lsn && lsn > prev_lsn,
+            "LSN {} is not within the current record ({}, {}]",
+            lsn,
+            prev_lsn,
+            self.lsn
+        );
+        let batch = self
+            .pending_data_batch
+            .get_or_insert_with(SerializedValueBatch::default);
+        batch.put(key.to_compact(), val, lsn);
+        Ok(())
+    }
+
     fn put_metadata(&mut self, key: CompactKey, val: Value) {
         let values = self.pending_metadata_pages.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
@@ -3080,6 +3157,72 @@ pub struct DatadirModificationStats {
     pub metadata_deltas: u64,
     pub data_images: u64,
     pub data_deltas: u64,
+}
+
+/// The multixact-offsets entry of the next, not yet created, multixid.
+///
+/// Since PostgreSQL 17.7, RecordNewMultiXact() sets the offset of the next
+/// multixid in addition to its own, and GetMultiXactIdMembers() errors out if
+/// the next multixid's offset is still zero. WAL ingestion does the same (see
+/// ingest_multixact_create()), but pageservers before that change only stored
+/// each multixid's own offset, so in what they ingested, the entry of nextMulti
+/// is not set. Its value is nextMultiOffset from the checkpoint, so we fill it
+/// in when serving the page.
+///
+/// That can't recover entries of multixids below nextMulti whose CREATE_ID
+/// record hadn't arrived yet at that LSN, since the multixids were assigned in a
+/// different order than they were WAL-logged. Only reading such an older
+/// pageserver's data at exactly such an LSN is affected.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NextMultiXactOffset {
+    segno: u32,
+    blknum: BlockNumber,
+    entry_off: usize,
+    value: u32,
+}
+
+impl NextMultiXactOffset {
+    pub(crate) fn from_checkpoint(
+        pg_version: PgMajorVersion,
+        checkpoint: &[u8],
+    ) -> Result<Option<Self>, DeserializeError> {
+        // Our v14-v16 Postgres branches predate the change.
+        if pg_version < PgMajorVersion::PG17 {
+            return Ok(None);
+        }
+        let (next_multi, next_offset) = dispatch_pgversion!(pg_version, {
+            let checkpoint = pgv::CheckPoint::decode(checkpoint)?;
+            (checkpoint.nextMulti, checkpoint.nextMultiOffset)
+        });
+        // No multixids have been created yet.
+        if next_multi == pg_constants::FIRST_MULTIXACT_ID && next_offset == 0 {
+            return Ok(None);
+        }
+
+        // Skip over invalid multixid 0 and offset 0, like RecordNewMultiXact() does.
+        let mid = next_multi.max(pg_constants::FIRST_MULTIXACT_ID);
+        let value = next_offset.max(1);
+
+        let per_page = pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+        let pageno = mid / per_page;
+        Ok(Some(Self {
+            segno: pageno / pg_constants::SLRU_PAGES_PER_SEGMENT,
+            blknum: pageno % pg_constants::SLRU_PAGES_PER_SEGMENT,
+            entry_off: (mid % per_page) as usize * 4,
+            value,
+        }))
+    }
+
+    /// Fill in the entry, if 'block' contains it and it's not set yet.
+    pub(crate) fn apply(&self, kind: SlruKind, segno: u32, blknum: BlockNumber, block: &mut [u8]) {
+        if kind != SlruKind::MultiXactOffsets || segno != self.segno || blknum != self.blknum {
+            return;
+        }
+        let entry = &mut block[self.entry_off..self.entry_off + 4];
+        if LittleEndian::read_u32(entry) == 0 {
+            LittleEndian::write_u32(entry, self.value);
+        }
+    }
 }
 
 /// This struct facilitates accessing either a committed key from the timeline at a
@@ -3221,6 +3364,62 @@ mod tests {
     use super::*;
     use crate::DEFAULT_PG_VERSION;
     use crate::tenant::harness::TenantHarness;
+
+    #[test]
+    fn next_multixact_offset_fixup() -> anyhow::Result<()> {
+        use postgres_ffi::v17::CheckPoint;
+
+        let per_page = pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
+        let encode = |next_multi: u32, next_offset: u32| -> anyhow::Result<Bytes> {
+            let mut checkpoint = CheckPoint::decode(&[0u8; size_of::<CheckPoint>()])?;
+            checkpoint.nextMulti = next_multi;
+            checkpoint.nextMultiOffset = next_offset;
+            Ok(checkpoint.encode()?)
+        };
+        let offsets = SlruKind::MultiXactOffsets;
+
+        // Not on PostgreSQL versions that predate the change
+        let cp = encode(10, 100)?;
+        assert!(NextMultiXactOffset::from_checkpoint(PgMajorVersion::PG16, &cp)?.is_none());
+
+        // Nothing to do in a cluster that hasn't created any multixids yet
+        let cp = encode(pg_constants::FIRST_MULTIXACT_ID, 0)?;
+        assert!(NextMultiXactOffset::from_checkpoint(PgMajorVersion::PG17, &cp)?.is_none());
+
+        // Multixid 10 starts at offset 100, on the first page
+        let cp = encode(10, 100)?;
+        let fixup = NextMultiXactOffset::from_checkpoint(PgMajorVersion::PG17, &cp)?.unwrap();
+        let mut page = vec![0u8; BLCKSZ as usize];
+        fixup.apply(offsets, 0, 1, &mut page);
+        fixup.apply(SlruKind::MultiXactMembers, 0, 0, &mut page);
+        assert!(
+            page.iter().all(|b| *b == 0),
+            "only the right page is modified"
+        );
+        fixup.apply(offsets, 0, 0, &mut page);
+        assert_eq!(LittleEndian::read_u32(&page[40..44]), 100);
+        // An entry that's already set is left alone
+        LittleEndian::write_u32(&mut page[40..44], 99);
+        fixup.apply(offsets, 0, 0, &mut page);
+        assert_eq!(LittleEndian::read_u32(&page[40..44]), 99);
+
+        // First entry of a page in the second segment
+        let next_multi = per_page * pg_constants::SLRU_PAGES_PER_SEGMENT + per_page;
+        let cp = encode(next_multi, 12345)?;
+        let fixup = NextMultiXactOffset::from_checkpoint(PgMajorVersion::PG17, &cp)?.unwrap();
+        let mut page = vec![0u8; BLCKSZ as usize];
+        fixup.apply(offsets, 1, 1, &mut page);
+        assert_eq!(LittleEndian::read_u32(&page[0..4]), 12345);
+
+        // Multixid and offset 0 are skipped over after wraparound
+        let cp = encode(0, 0)?;
+        let fixup = NextMultiXactOffset::from_checkpoint(PgMajorVersion::PG17, &cp)?.unwrap();
+        let mut page = vec![0u8; BLCKSZ as usize];
+        fixup.apply(offsets, 0, 0, &mut page);
+        assert_eq!(LittleEndian::read_u32(&page[4..8]), 1);
+
+        Ok(())
+    }
 
     /// Test a round trip of aux file updates, from DatadirModification to reading back from the Timeline
     #[tokio::test]
