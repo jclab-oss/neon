@@ -175,7 +175,7 @@
         "per_version": {
           "type": "object",
           "patternProperties": {
-            "^1[4-7]$": {
+            "^1[4-8]$": {
               "type": "object",
               "properties": {
                 "common": {

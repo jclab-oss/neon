@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
-use postgres_ffi::{ControlFileData, PgMajorVersion};
+use postgres_ffi::{PgControlData, PgMajorVersion};
 use remote_storage::{
     Download, DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, Listing,
     ListingObject, RemotePath, RemoteStorageConfig,
@@ -246,14 +246,13 @@ impl RemoteStorageWrapper {
 }
 
 pub struct ControlFile {
-    control_file_data: ControlFileData,
+    control_file_data: PgControlData,
     control_file_buf: Bytes,
 }
 
 impl ControlFile {
     pub(crate) fn new(control_file_buf: Bytes) -> Result<Self, anyhow::Error> {
-        // XXX ControlFileData is version-specific, we're always using v14 here. v17 had changes.
-        let control_file_data = ControlFileData::decode(&control_file_buf)?;
+        let control_file_data = PgControlData::decode(&control_file_buf)?;
         let control_file = ControlFile {
             control_file_data,
             control_file_buf,
@@ -262,13 +261,13 @@ impl ControlFile {
         Ok(control_file)
     }
     pub(crate) fn base_lsn(&self) -> Lsn {
-        Lsn(self.control_file_data.checkPoint).align()
+        Lsn(self.control_file_data.checkpoint).align()
     }
     pub(crate) fn pg_version(&self) -> PgMajorVersion {
         self.try_pg_version()
             .expect("prepare() checks that try_pg_version doesn't error")
     }
-    pub(crate) fn control_file_data(&self) -> &ControlFileData {
+    pub(crate) fn control_file_data(&self) -> &PgControlData {
         &self.control_file_data
     }
     pub(crate) fn control_file_buf(&self) -> &Bytes {
@@ -282,6 +281,7 @@ impl ControlFile {
             202209061 => PgMajorVersion::PG15,
             202307071 => PgMajorVersion::PG16,
             202406281 => PgMajorVersion::PG17,
+            202506291 => PgMajorVersion::PG18,
             catversion => {
                 anyhow::bail!("unrecognized catalog version {catversion}")
             }

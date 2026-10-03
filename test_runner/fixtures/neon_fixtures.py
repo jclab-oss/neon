@@ -69,6 +69,7 @@ from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
 from fixtures.paths import get_test_repo_dir, shared_snapshot_dir
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     LocalFsStorage,
@@ -117,7 +118,6 @@ if TYPE_CHECKING:
 
     from fixtures.h2server import H2Server
     from fixtures.paths import SnapshotDirLocked
-    from fixtures.pg_version import PgVersion
 
     T = TypeVar("T")
 
@@ -547,6 +547,10 @@ class NeonEnvBuilder:
             assert self.compatibility_pg_distrib_dir is not None, (
                 "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
             )
+            # A previous release that predates this Postgres version can't run it: neither its
+            # compute, nor its storage components, which reject the unknown version.
+            if not (self.compatibility_pg_distrib_dir / self.pg_version.v_prefixed).is_dir():
+                pytest.skip(f"the previous release doesn't support Postgres {self.pg_version}")
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
             self.test_may_use_compatibility_snapshot_binaries = True
@@ -3495,7 +3499,13 @@ class VanillaPostgres(PgProtocol):
         self.pg_bin = pg_bin
         self.running = False
         if init:
-            self.pg_bin.run_capture(["initdb", "--pgdata", str(pgdatadir)])
+            initdb_args = ["initdb", "--pgdata", str(pgdatadir)]
+            # Data checksums are enabled by default since v18. Neon doesn't
+            # maintain page checksums, so a cluster imported with them enabled
+            # would fail to verify the pages that the pageserver reconstructs.
+            if self.pg_bin.pg_version >= PgVersion.V18:
+                initdb_args.append("--no-data-checksums")
+            self.pg_bin.run_capture(initdb_args)
         self.configure([f"port = {port}\n"])
 
     def enable_tls(self):

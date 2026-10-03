@@ -406,7 +406,13 @@ DecodeXLogTuple(char *data, Size len, ReorderBufferTupleBuf *tuple)
 }
 #endif
 
-#if PG_MAJORVERSION_NUM == 17
+#if PG_MAJORVERSION_NUM >= 17
+
+/* Renamed in v18; the decoding code is otherwise the same as in v17 */
+#if PG_MAJORVERSION_NUM >= 18
+#define ReorderBufferGetChange ReorderBufferAllocChange
+#define ReorderBufferGetTupleBuf ReorderBufferAllocTupleBuf
+#endif
 
 /* individual record(group)'s handlers */
 static void DecodeNeonInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf);

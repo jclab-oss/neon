@@ -15,7 +15,7 @@ branch = os.getenv("BRANCH")
 # aws_region = os.getenv("AWS_REGION")
 registry = os.getenv("REGISTRY", "ghcr.io/neondatabase")
 # Build and Test may only build the compute images of some Postgres versions, e.g. "v16,v17"
-pg_versions = os.getenv("PG_VERSIONS") or "v14,v15,v16,v17"
+pg_versions = os.getenv("PG_VERSIONS") or "v14,v15,v16,v17,v18"
 
 components = {
     "neon": ["neon"],

@@ -8,6 +8,8 @@
 
 #include "fmgr.h"
 #include "storage/buf_internals.h"
+/* for the WL_* flags, which moved to storage/waiteventset.h in v18 */
+#include "storage/latch.h"
 
 #if PG_MAJORVERSION_NUM < 16
 typedef PGAlignedBlock PGIOAlignedBlock;
@@ -171,8 +173,20 @@ extern void InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags);
 extern TimeLineID GetWALInsertionTimeLine(void);
 #endif
 
-/* format codes not present in PG17-; but available in PG18+ */
+/* format codes not present in PG18-; but available in PG19+ */
+#if PG_MAJORVERSION_NUM < 18
 #define INT64_HEX_FORMAT "%" INT64_MODIFIER "x"
 #define UINT64_HEX_FORMAT "%" INT64_MODIFIER "x"
+#else
+#define INT64_HEX_FORMAT "%" PRIx64
+#define UINT64_HEX_FORMAT "%" PRIx64
+#endif
+
+/* relpath() returns a RelPathStr struct since v18, rather than a palloc'd string */
+#if PG_MAJORVERSION_NUM < 18
+#define relpath_str(rlocator, forknum) relpath(rlocator, forknum)
+#else
+#define relpath_str(rlocator, forknum) (relpath(rlocator, forknum).str)
+#endif
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */

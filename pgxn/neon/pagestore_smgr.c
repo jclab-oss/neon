@@ -68,6 +68,7 @@
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
+#include "neon_smgr_aio.h"
 #include "pagestore_client.h"
 
 #if PG_VERSION_NUM >= 150000
@@ -1044,7 +1045,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg(NEON_TAG "cannot extend file \"%s\" beyond %u blocks",
-						relpath(reln->smgr_rlocator, forkNum),
+						relpath_str(reln->smgr_rlocator, forkNum),
 						InvalidBlockNumber)));
 
 	if (debug_compare_local)
@@ -1710,6 +1711,20 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 				return;
 			}
+#if PG_MAJORVERSION_NUM >= 18
+			/*
+			 * Before v18, FlushBuffer() opened the relation with unknown
+			 * persistence (case 0 above), and a relation that is being built
+			 * with an unlogged build in another backend was recognized by its
+			 * local file. Since v18 it passes the persistence of the buffer,
+			 * which is permanent for those too, so check it here.
+			 */
+			if (mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum))
+			{
+				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+				return;
+			}
+#endif
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -2204,7 +2219,11 @@ neon_smgr_read_slru_segment(SMgrRelation reln, const char *path, int segno, void
  * segment; the caller then treats the file as nonexistent.
  */
 bool
+#if PG_MAJORVERSION_NUM >= 18
+neon_download_slru_segment(const char *path, int64 segno)
+#else
 neon_download_slru_segment(const char *path, int segno)
+#endif
 {
 	char	   *buffer;
 	int			n_blocks;
@@ -2291,20 +2310,208 @@ AtEOXact_neon(XactEvent event, void *arg)
 	communicator_reconfigure_timeout_if_needed();
 }
 
+#if PG_MAJORVERSION_NUM >= 18
+/*
+ * Since v18, smgr.c holds interrupts while it calls into the storage manager:
+ * the AIO subsystem needs that once an IO has been defined, and md.c must not
+ * have the files it's using closed by interrupt processing. But our callbacks
+ * that wait for the pageserver have to stay interruptible, like they were
+ * before v18: statement_timeout must be able to cancel a request that is stuck,
+ * and the communicator processes prefetch responses in interrupt processing.
+ * So these wrappers undo smgr.c's holdoff around the callbacks that can wait,
+ * leaving any holdoff of the caller (e.g. for an LWLock) in place.
+ */
+#define NEON_INTERRUPTIBLE(call) \
+	do { \
+		RESUME_INTERRUPTS(); \
+		call; \
+		HOLD_INTERRUPTS(); \
+	} while (0)
+
+static bool
+neon_exists_interruptible(SMgrRelation reln, ForkNumber forknum)
+{
+	bool		result;
+
+	NEON_INTERRUPTIBLE(result = neon_exists(reln, forknum));
+	return result;
+}
+
+static void
+neon_extend_interruptible(SMgrRelation reln, ForkNumber forknum,
+						  BlockNumber blkno, const void *buffer, bool skipFsync)
+{
+	NEON_INTERRUPTIBLE(neon_extend(reln, forknum, blkno, buffer, skipFsync));
+}
+
+static bool
+neon_prefetch_interruptible(SMgrRelation reln, ForkNumber forknum,
+							BlockNumber blocknum, int nblocks)
+{
+	bool		result;
+
+	NEON_INTERRUPTIBLE(result = neon_prefetch(reln, forknum, blocknum, nblocks));
+	return result;
+}
+
+static void
+neon_readv_interruptible(SMgrRelation reln, ForkNumber forknum,
+						 BlockNumber blocknum, void **buffers, BlockNumber nblocks)
+{
+	NEON_INTERRUPTIBLE(neon_readv(reln, forknum, blocknum, buffers, nblocks));
+}
+
+static BlockNumber
+neon_nblocks_interruptible(SMgrRelation reln, ForkNumber forknum)
+{
+	BlockNumber result;
+
+	NEON_INTERRUPTIBLE(result = neon_nblocks(reln, forknum));
+	return result;
+}
+
+/*
+ * Is the relation read from local files with md.c, rather than from the
+ * pageserver? That's the case for unlogged relations, and for the relation
+ * that is being built with an unlogged build. Temporary relations are owned
+ * by md.c directly (see neon_owns()), but can show up here too.
+ *
+ * This follows the logic of neon_readv().
+ */
+static bool
+neon_reads_locally(SMgrRelation reln)
+{
+	switch (reln->smgr_relpersistence)
+	{
+		case 0:
+			neon_log(ERROR, "cannot read rel with unknown persistence");
+			break;
+
+		case RELPERSISTENCE_PERMANENT:
+			return RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln));
+
+		case RELPERSISTENCE_TEMP:
+		case RELPERSISTENCE_UNLOGGED:
+			return true;
+
+		default:
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+	}
+	pg_unreachable();
+}
+
+/*
+ * neon_maxcombine() -- Return the maximum number of blocks that can be read
+ * or written with one readv/writev call.
+ */
+static uint32
+neon_maxcombine(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+{
+	if (neon_reads_locally(reln))
+		return mdmaxcombine(reln, forknum, blocknum);
+
+	/* neon_readv() and neon_writev() accept up to PG_IOV_MAX blocks */
+	return PG_IOV_MAX;
+}
+
+/*
+ * neon_startreadv() -- Start reading blocks with AIO.
+ *
+ * Since v18, this is the path that the buffer manager reads all blocks
+ * through. We read the blocks synchronously, and complete the AIO handle
+ * right away. Prefetching still happens with smgrprefetch(), which the
+ * read stream code calls ahead of the reads with io_method=sync.
+ */
+static void
+neon_startreadv(PgAioHandle *ioh, SMgrRelation reln, ForkNumber forknum,
+				BlockNumber blocknum, void **buffers, BlockNumber nblocks)
+{
+	if (neon_reads_locally(reln))
+	{
+		/*
+		 * An IO worker that executed the read would have to reopen the file
+		 * with smgr_fd() in a process that doesn't know about our unlogged
+		 * build state. So execute it in this process.
+		 */
+		pgaio_io_set_flag(ioh, PGAIO_HF_SYNCHRONOUS);
+		mdstartreadv(ioh, reln, forknum, blocknum, buffers, nblocks);
+		return;
+	}
+
+	/*
+	 * Read the blocks with interrupts allowed (see NEON_INTERRUPTIBLE). The
+	 * AIO subsystem only needs them held once we define the IO. If we error
+	 * out before that, the handle we were handed is released, like when
+	 * mdstartreadv() fails to open the file.
+	 */
+	RESUME_INTERRUPTS();
+	neon_readv(reln, forknum, blocknum, buffers, nblocks);
+	HOLD_INTERRUPTS();
+
+	neon_aio_complete_readv(ioh, reln, forknum, blocknum, nblocks);
+}
+
+/*
+ * neon_fd() -- Get the file descriptor for executing an AIO in another
+ * process.
+ *
+ * neon_startreadv() always executes the IO in the calling process, so this
+ * is never needed.
+ */
+static int
+neon_fd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
+{
+	neon_log(ERROR, "neon smgr relations cannot be accessed with a file descriptor");
+	pg_unreachable();
+}
+
+/*
+ * neon_owns() -- Does the neon smgr handle this relation?
+ *
+ * Temporary relations are handled by md.c. Unlogged relations go through us
+ * too, and we forward them to md.c ourselves, because a relation's
+ * persistence changes during an unlogged build.
+ */
+static bool
+neon_owns(RelFileLocator rlocator, ProcNumber backend, char relpersistence)
+{
+	return backend == INVALID_PROC_NUMBER;
+}
+#endif
+
 static const struct f_smgr neon_smgr =
 {
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_name = "neon",
+	.smgr_init = smgr_init_neon,
+#else
 	.smgr_init = neon_init,
+#endif
 	.smgr_shutdown = NULL,
 	.smgr_open = neon_open,
 	.smgr_close = neon_close,
 	.smgr_create = neon_create,
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_exists = neon_exists_interruptible,
+#else
 	.smgr_exists = neon_exists,
+#endif
 	.smgr_unlink = neon_unlink,
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_extend = neon_extend_interruptible,
+#else
 	.smgr_extend = neon_extend,
+#endif
 #if PG_MAJORVERSION_NUM >= 16
 	.smgr_zeroextend = neon_zeroextend,
 #endif
-#if PG_MAJORVERSION_NUM >= 17
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_prefetch = neon_prefetch_interruptible,
+	.smgr_maxcombine = neon_maxcombine,
+	.smgr_readv = neon_readv_interruptible,
+	.smgr_startreadv = neon_startreadv,
+	.smgr_writev = neon_writev,
+#elif PG_MAJORVERSION_NUM >= 17
 	.smgr_prefetch = neon_prefetch,
 	.smgr_readv = neon_readv,
 	.smgr_writev = neon_writev,
@@ -2315,21 +2522,87 @@ static const struct f_smgr neon_smgr =
 #endif
 
 	.smgr_writeback = neon_writeback,
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_nblocks = neon_nblocks_interruptible,
+#else
 	.smgr_nblocks = neon_nblocks,
+#endif
 	.smgr_truncate = neon_truncate,
 	.smgr_immedsync = neon_immedsync,
 #if PG_MAJORVERSION_NUM >= 17
 	.smgr_registersync = neon_registersync,
 #endif
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_fd = neon_fd,
+	.smgr_owns = neon_owns,
+#else
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
 	.smgr_end_unlogged_build = neon_end_unlogged_build,
+#endif
 
 #if PG_MAJORVERSION_NUM < 17
 	.smgr_read_slru_segment = neon_smgr_read_slru_segment,
 #endif
 };
 
+#if PG_MAJORVERSION_NUM >= 18
+static SmgrId neon_smgr_id = -1;
+
+static start_unlogged_build_hook_type prev_start_unlogged_build_hook;
+static finish_unlogged_build_phase_1_hook_type prev_finish_unlogged_build_phase_1_hook;
+static end_unlogged_build_hook_type prev_end_unlogged_build_hook;
+
+/*
+ * The unlogged build hooks are called for every relation, but used to be
+ * f_smgr callbacks, so only act on relations of our smgr.
+ */
+static void
+neon_start_unlogged_build_hook(SMgrRelation reln)
+{
+	if (reln->smgr_which == neon_smgr_id)
+		neon_start_unlogged_build(reln);
+	else if (prev_start_unlogged_build_hook)
+		prev_start_unlogged_build_hook(reln);
+}
+
+static void
+neon_finish_unlogged_build_phase_1_hook(SMgrRelation reln)
+{
+	if (reln->smgr_which == neon_smgr_id)
+		neon_finish_unlogged_build_phase_1(reln);
+	else if (prev_finish_unlogged_build_phase_1_hook)
+		prev_finish_unlogged_build_phase_1_hook(reln);
+}
+
+static void
+neon_end_unlogged_build_hook(SMgrRelation reln)
+{
+	if (reln->smgr_which == neon_smgr_id)
+		neon_end_unlogged_build(reln);
+	else if (prev_end_unlogged_build_hook)
+		prev_end_unlogged_build_hook(reln);
+}
+
+/*
+ * Register the neon smgr. This must be called in the postmaster, before any
+ * process calls smgrinit(), and only once: smgrregister() keeps a copy of the
+ * struct in the process's smgr table.
+ */
+void
+smgr_register_neon(void)
+{
+	Assert(neon_smgr_id == -1);
+	neon_smgr_id = smgrregister(&neon_smgr);
+
+	prev_start_unlogged_build_hook = start_unlogged_build_hook;
+	start_unlogged_build_hook = neon_start_unlogged_build_hook;
+	prev_finish_unlogged_build_phase_1_hook = finish_unlogged_build_phase_1_hook;
+	finish_unlogged_build_phase_1_hook = neon_finish_unlogged_build_phase_1_hook;
+	prev_end_unlogged_build_hook = end_unlogged_build_hook;
+	end_unlogged_build_hook = neon_end_unlogged_build_hook;
+}
+#else
 const f_smgr *
 smgr_neon(ProcNumber backend, NRelFileInfo rinfo)
 {
@@ -2340,13 +2613,17 @@ smgr_neon(ProcNumber backend, NRelFileInfo rinfo)
 	else
 		return &neon_smgr;
 }
+#endif
 
 void
 smgr_init_neon(void)
 {
 	RegisterXactCallback(AtEOXact_neon, NULL);
 
+#if PG_MAJORVERSION_NUM < 18
+	/* Since v18, smgrinit() initializes md.c itself */
 	smgr_init_standard();
+#endif
 	neon_init();
 	communicator_init();
 }

@@ -5,7 +5,7 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install
 
 # Supported PostgreSQL versions
-POSTGRES_VERSIONS = v17 v16 v15 v14
+POSTGRES_VERSIONS = v18 v17 v16 v15 v14
 
 # CARGO_BUILD_FLAGS: Extra flags to pass to `cargo build`. `--locked`
 # and `--features testing` are popular examples.
