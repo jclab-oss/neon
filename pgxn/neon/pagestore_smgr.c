@@ -86,7 +86,7 @@ static char *hexdump_page(char *page);
 		NInfoGetRelNumber(InfoFromSMgrRel(reln)) >= FirstNormalObjectId \
 )
 
-const int	SmgrTrace = DEBUG5;
+static const int SmgrTrace = DEBUG5;
 
 /* unlogged relation build states */
 typedef enum

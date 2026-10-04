@@ -68,9 +68,9 @@ static const struct config_enum_entry neon_compute_modes[] = {
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
-char	   *neon_project_id;
-char	   *neon_branch_id;
-char	   *neon_endpoint_id;
+static char *neon_project_id;
+static char *neon_branch_id;
+static char *neon_endpoint_id;
 int32		max_cluster_size;
 char	   *pageserver_connstring;
 char	   *neon_auth_token;
@@ -1424,7 +1424,7 @@ pageserver_flush(shardno_t shard_no)
 	return true;
 }
 
-page_server_api api =
+static page_server_api api =
 {
 	.send = pageserver_send,
 	.flush = pageserver_flush,

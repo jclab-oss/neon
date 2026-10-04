@@ -57,7 +57,7 @@ typedef struct LwLsnCacheCtl {
  */
 static HTAB *lastWrittenLsnCache;
 
-LwLsnCacheCtl* LwLsnCache;
+static LwLsnCacheCtl* LwLsnCache;
 
 static int lwlsn_cache_size = (128 * 1024); 
 

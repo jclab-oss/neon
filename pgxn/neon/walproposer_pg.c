@@ -65,13 +65,13 @@
 char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
-int			safekeeper_proto_version = 3;
-char	   *safekeeper_conninfo_options = "";
+static int	safekeeper_proto_version = 3;
+static char *safekeeper_conninfo_options = "";
 /* BEGIN_HADRON */
-int         databricks_max_wal_mb_per_second = -1;
+static int	databricks_max_wal_mb_per_second = -1;
 // during throttling, we will limit the effective WAL write rate to 10KB.
 // PG can still push some WAL to SK, but at a very low rate.
-int 		databricks_throttled_max_wal_bytes_per_second = 10 * 1024;
+static int	databricks_throttled_max_wal_bytes_per_second = 10 * 1024;
 // The max sleep time of a batch. This is to make sure the rate limiter does not
 // overshoot too much and block PG for a very long time.
 // This is set as 5 minuetes for now. PG can send as much as 10MB of WALs to SK in one batch,
