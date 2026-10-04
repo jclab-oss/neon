@@ -811,6 +811,21 @@ BeginRedoForBlock(StringInfo input_message)
 		 target_redo_tag.blockNum);
 
 	reln = smgropen(rinfo, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT);
+
+	/*
+	 * Forget the sizes of the other forks, which an earlier request with one
+	 * of them as the target might have cached (see below). With a stale size,
+	 * XLogReadBufferExtended() would extend e.g. the FSM, when a record of
+	 * this request updates it, and the extension can need more of our few
+	 * local buffers than there are. inmem_nblocks() reports all forks as
+	 * maximally sized.
+	 */
+	for (int i = 0; i <= MAX_FORKNUM; i++)
+	{
+		if (i != forknum)
+			reln->smgr_cached_nblocks[i] = InvalidBlockNumber;
+	}
+
 	if (reln->smgr_cached_nblocks[forknum] == InvalidBlockNumber ||
 		reln->smgr_cached_nblocks[forknum] < blknum + 1)
 	{
