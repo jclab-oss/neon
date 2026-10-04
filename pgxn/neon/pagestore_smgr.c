@@ -2157,7 +2157,7 @@ neon_end_unlogged_build(SMgrRelation reln)
  * segment), or -1 if 'path' is not an SLRU that the pageserver stores.
  */
 static int
-neon_read_slru_segment(const char *path, int segno, void *buffer)
+neon_read_slru_segment(const char *path, int64 segno, void *buffer)
 {
 	XLogRecPtr	request_lsn,
 				not_modified_since;

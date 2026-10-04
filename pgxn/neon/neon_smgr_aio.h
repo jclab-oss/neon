@@ -44,6 +44,11 @@ static inline void
 neon_aio_complete_readv(PgAioHandle *ioh, SMgrRelation reln, ForkNumber forknum,
 						BlockNumber blocknum, BlockNumber nblocks)
 {
+	/*
+	 * The IO is performed by the time anyone could wait for it, so they must
+	 * not wait for the IO method (e.g. io_uring) to complete it.
+	 */
+	pgaio_io_set_flag(ioh, PGAIO_HF_SYNCHRONOUS);
 	pgaio_io_set_target_smgr(ioh, reln, forknum, blocknum, nblocks, false);
 
 	/* the checks of pgaio_io_before_start() */
