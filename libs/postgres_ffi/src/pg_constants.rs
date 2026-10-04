@@ -99,7 +99,7 @@ pub const XACT_XINFO_HAS_INVALS: u32 = 1u32 << 3;
 pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 pub const XACT_XINFO_HAS_ORIGIN: u32 = 1u32 << 5;
 // pub const XACT_XINFO_HAS_AE_LOCKS: u32 = 1u32 << 6;
-// pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
+pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
 
 // From pg_control.h and rmgrlist.h
 pub const XLOG_NEXTOID: u8 = 0x30;
