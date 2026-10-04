@@ -105,6 +105,7 @@ jobs:
       versions: ${{ steps.select.outputs.versions }}
       compute: ${{ steps.select.outputs.compute }}
       test-extensions: ${{ steps.select.outputs.test-extensions }}
+      experimental: ${{ steps.select.outputs.experimental }}
       release-test-cfg: ${{ steps.select.outputs.release-test-cfg }}
       debug-test-cfg: ${{ steps.select.outputs.debug-test-cfg }}
       test-extensions-latest-map: ${{ steps.select.outputs.test-extensions-latest-map }}
@@ -159,6 +160,7 @@ jobs:
               "versions": versions,
               "compute": [{"pg": v, "debian": debian[v]} for v in versions],
               "test-extensions": test_extensions,
+              "experimental": [v for v in versions if v in experimental],
               # Release builds run the tests on every version with LFC, and on the default version
               # without it as well; debug builds only on the default version, without LFC.
               "release-test-cfg": [
@@ -166,7 +168,9 @@ jobs:
                   for v in versions
               ]
               + [{"pg_version": v, "lfc_state": "without-lfc"} for v in versions if v == default_version],
-              "debug-test-cfg": [{"pg_version": debug_version, "lfc_state": "without-lfc"}],
+              "debug-test-cfg": [
+                  {"pg_version": debug_version, "lfc_state": "without-lfc", "experimental": debug_version in experimental}
+              ],
               "test-extensions-latest-map": {
                   f"{registry}/neon-test-extensions-{v}:{build_tag}": [f"{registry}/neon-test-extensions-{v}:latest"]
                   for v in test_extensions
@@ -2041,6 +2045,7 @@ jobs:
           RELEASE_TAG: ${{ needs.meta.outputs.build-tag }}
           RUN_ID: ${{ needs.meta.outputs.release-pr-run-id }}
           PG_VERSIONS: ${{ needs.pg-versions.outputs.versions }}
+          EXPERIMENTAL_PG_VERSIONS: ${{ needs.pg-versions.outputs.experimental }}
         run: |
           REPOSITORY=${REPOSITORY,,}
           echo "${GH_TOKEN}" | oras login ghcr.io --username "${ACTOR}" --password-stdin
@@ -2076,6 +2081,15 @@ jobs:
                 rm -rf "${workdir}"
                 continue
               fi
+              # Neither do failing tests of experimental Postgres versions (see pg-versions), which also
+              # leave no snapshot
+              for pg_version in $(jq -r '.[]' <<< "${EXPERIMENTAL_PG_VERSIONS}"); do
+                if [[ "${name}" == compatibility-snapshot-*-pg${pg_version} ]]; then
+                  echo "::warning::${name} of the experimental ${pg_version} is missing from run ${RUN_ID}, not promoting it"
+                  rm -rf "${workdir}"
+                  continue 2
+                fi
+              done
               exit 1
             fi
 
