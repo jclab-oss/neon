@@ -1818,9 +1818,11 @@ RUN case "${PG_VERSION}" in \
     wget https://github.com/pgaudit/pgaudit/archive/refs/tags/${PGAUDIT_VERSION}.tar.gz -O pgaudit.tar.gz && \
     echo "${PGAUDIT_CHECKSUM} pgaudit.tar.gz" | sha256sum --check && \
     mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C . && \
-    if [ -f "/ext-src/pgaudit-parallel_workers-${PG_VERSION}.patch" ]; then \
-        patch -p1 < "/ext-src/pgaudit-parallel_workers-${PG_VERSION}.patch"; \
-    fi
+    case "${PG_VERSION}" in \
+    "v18") ;; \
+    *) patch -p1 < "/ext-src/pgaudit-parallel_workers-${PG_VERSION}.patch" ;; \
+    esac && \
+    find /ext-src -maxdepth 1 -name 'pgaudit-parallel_workers-*.patch' ! -name "pgaudit-parallel_workers-${PG_VERSION}.patch" -delete
 
 FROM pg-build AS pgaudit-build
 COPY --from=pgaudit-src /ext-src/ /ext-src/
