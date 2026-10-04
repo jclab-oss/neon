@@ -59,6 +59,7 @@
 #include "storage/buf_internals.h"
 #include "storage/fd.h"
 #include "storage/fsm_internals.h"
+#include "storage/ipc.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
 
@@ -2621,10 +2622,31 @@ smgr_neon(ProcNumber backend, NRelFileInfo rinfo)
 }
 #endif
 
+#if PG_MAJORVERSION_NUM >= 18
+/*
+ * Release the AIO handle that neon_startreadv() was handed, when an error in
+ * neon_readv() ends the process. Regular backends release it when they abort
+ * the transaction, but e.g. the startup process only releases its resource
+ * owner after pgaio_shutdown(), which finds the handle still handed out: it
+ * fails an assertion, or without assertions, the resource owner crashes on
+ * the handle later. smgrinit() calls us after pgaio_init_backend() registered
+ * pgaio_shutdown(), so this runs before it.
+ */
+static void
+neon_aio_before_shmem_exit(int code, Datum arg)
+{
+	if (pgaio_my_backend != NULL && pgaio_my_backend->handed_out_io != NULL)
+		pgaio_io_release(pgaio_my_backend->handed_out_io);
+}
+#endif
+
 void
 smgr_init_neon(void)
 {
 	RegisterXactCallback(AtEOXact_neon, NULL);
+#if PG_MAJORVERSION_NUM >= 18
+	before_shmem_exit(neon_aio_before_shmem_exit, 0);
+#endif
 
 #if PG_MAJORVERSION_NUM < 18
 	/* Since v18, smgrinit() initializes md.c itself */
