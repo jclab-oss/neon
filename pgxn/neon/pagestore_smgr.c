@@ -2321,26 +2321,50 @@ AtEOXact_neon(XactEvent event, void *arg)
 /*
  * Since v18, smgr.c holds interrupts while it calls into the storage manager:
  * the AIO subsystem needs that once an IO has been defined, and md.c must not
- * have the files it's using closed by interrupt processing. But our callbacks
- * that wait for the pageserver have to stay interruptible, like they were
- * before v18: statement_timeout must be able to cancel a request that is stuck,
- * and the communicator processes prefetch responses in interrupt processing.
- * So these wrappers undo smgr.c's holdoff around the callbacks that can wait,
- * leaving any holdoff of the caller (e.g. for an LWLock) in place.
+ * have the files it's using closed by interrupt processing (see smgr.c). But
+ * our callbacks that wait for the pageserver have to stay interruptible, like
+ * they were before v18: statement_timeout must be able to cancel a request
+ * that is stuck, and the communicator processes prefetch responses in
+ * interrupt processing. So these wrappers undo smgr.c's holdoff around the
+ * callbacks, leaving any holdoff of the caller (e.g. for an LWLock) in place,
+ * unless 'local' says that the callback works on local files with md.c.
  */
-#define NEON_INTERRUPTIBLE(call) \
+#define NEON_INTERRUPTIBLE(local, call) \
 	do { \
-		RESUME_INTERRUPTS(); \
-		call; \
-		HOLD_INTERRUPTS(); \
+		if (local) \
+			call; \
+		else \
+		{ \
+			RESUME_INTERRUPTS(); \
+			call; \
+			HOLD_INTERRUPTS(); \
+		} \
 	} while (0)
+
+/* Is it a temporary or unlogged relation, which md.c stores locally? */
+static bool
+neon_rel_is_local(SMgrRelation reln)
+{
+	return reln->smgr_relpersistence == RELPERSISTENCE_TEMP ||
+		reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED;
+}
+
+/* ... or the relation that this backend builds with an unlogged build? */
+static bool
+neon_rel_is_local_or_unlogged_build(SMgrRelation reln)
+{
+	return neon_rel_is_local(reln) ||
+		(reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
+		 RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
+}
 
 static bool
 neon_exists_interruptible(SMgrRelation reln, ForkNumber forknum)
 {
 	bool		result;
 
-	NEON_INTERRUPTIBLE(result = neon_exists(reln, forknum));
+	NEON_INTERRUPTIBLE(neon_rel_is_local(reln),
+					   result = neon_exists(reln, forknum));
 	return result;
 }
 
@@ -2348,7 +2372,8 @@ static void
 neon_extend_interruptible(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blkno, const void *buffer, bool skipFsync)
 {
-	NEON_INTERRUPTIBLE(neon_extend(reln, forknum, blkno, buffer, skipFsync));
+	NEON_INTERRUPTIBLE(neon_rel_is_local_or_unlogged_build(reln),
+					   neon_extend(reln, forknum, blkno, buffer, skipFsync));
 }
 
 static bool
@@ -2357,7 +2382,8 @@ neon_prefetch_interruptible(SMgrRelation reln, ForkNumber forknum,
 {
 	bool		result;
 
-	NEON_INTERRUPTIBLE(result = neon_prefetch(reln, forknum, blocknum, nblocks));
+	NEON_INTERRUPTIBLE(neon_rel_is_local(reln),
+					   result = neon_prefetch(reln, forknum, blocknum, nblocks));
 	return result;
 }
 
@@ -2365,7 +2391,8 @@ static void
 neon_readv_interruptible(SMgrRelation reln, ForkNumber forknum,
 						 BlockNumber blocknum, void **buffers, BlockNumber nblocks)
 {
-	NEON_INTERRUPTIBLE(neon_readv(reln, forknum, blocknum, buffers, nblocks));
+	NEON_INTERRUPTIBLE(neon_rel_is_local_or_unlogged_build(reln),
+					   neon_readv(reln, forknum, blocknum, buffers, nblocks));
 }
 
 static BlockNumber
@@ -2373,7 +2400,8 @@ neon_nblocks_interruptible(SMgrRelation reln, ForkNumber forknum)
 {
 	BlockNumber result;
 
-	NEON_INTERRUPTIBLE(result = neon_nblocks(reln, forknum));
+	NEON_INTERRUPTIBLE(neon_rel_is_local_or_unlogged_build(reln),
+					   result = neon_nblocks(reln, forknum));
 	return result;
 }
 
