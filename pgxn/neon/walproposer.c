@@ -785,10 +785,10 @@ UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
 			 */
 			if (wp->members_safekeepers[i] != NULL && wp->members_safekeepers[i] != sk)
 			{
-				wp_log(WARNING, "safekeeper {id = %lu, ep = %s:%u } in members[%u] is already mapped to connection slot %lu",
+				wp_log(WARNING, "safekeeper {id = " UINT64_FORMAT ", ep = %s:%u } in members[%u] is already mapped to connection slot %lu",
 					   sk_id->node_id, sk_id->host, sk_id->port, i, wp->members_safekeepers[i] - wp->safekeeper);
 			}
-			wp_log(LOG, "safekeeper {id = %lu, ep = %s:%u } in members[%u] mapped to connection slot %lu",
+			wp_log(LOG, "safekeeper {id = " UINT64_FORMAT ", ep = %s:%u } in members[%u] mapped to connection slot %lu",
 				   sk_id->node_id, sk_id->host, sk_id->port, i, sk - wp->safekeeper);
 			wp->members_safekeepers[i] = sk;
 		}
@@ -802,10 +802,10 @@ UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
 		{
 			if (wp->new_members_safekeepers[i] != NULL && wp->new_members_safekeepers[i] != sk)
 			{
-				wp_log(WARNING, "safekeeper {id = %lu, ep = %s:%u } in new_members[%u] is already mapped to connection slot %lu",
+				wp_log(WARNING, "safekeeper {id = " UINT64_FORMAT ", ep = %s:%u } in new_members[%u] is already mapped to connection slot %lu",
 					   sk_id->node_id, sk_id->host, sk_id->port, i, wp->new_members_safekeepers[i] - wp->safekeeper);
 			}
-			wp_log(LOG, "safekeeper {id = %lu, ep = %s:%u } in new_members[%u] mapped to connection slot %lu",
+			wp_log(LOG, "safekeeper {id = " UINT64_FORMAT ", ep = %s:%u } in new_members[%u] mapped to connection slot %lu",
 				   sk_id->node_id, sk_id->host, sk_id->port, i, sk - wp->safekeeper);
 			wp->new_members_safekeepers[i] = sk;
 		}
@@ -861,7 +861,7 @@ TermsCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 		{
 			if (n_greeted > 0)
 				appendStringInfoString(s, ", ");
-			appendStringInfo(s, "{id = %lu, ep = %s:%s}", sk->greetResponse.nodeId, sk->host, sk->port);
+			appendStringInfo(s, "{id = " UINT64_FORMAT ", ep = %s:%s}", sk->greetResponse.nodeId, sk->host, sk->port);
 			n_greeted++;
 		}
 	}
@@ -933,7 +933,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		return;
 
 	mconf_toml = MembershipConfigurationToString(&sk->greetResponse.mconf);
-	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, node_id = %lu, mconf = %s, term=" UINT64_FORMAT,
+	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, node_id = " UINT64_FORMAT ", mconf = %s, term=" UINT64_FORMAT,
 		   sk->host, sk->port, sk->greetResponse.nodeId, mconf_toml, sk->greetResponse.term);
 	pfree(mconf_toml);
 
@@ -1045,7 +1045,7 @@ SendVoteRequest(Safekeeper *sk)
 					   &sk->outbuf, wp->config->proto_version);
 
 	/* We have quorum for voting, send our vote request */
-	wp_log(LOG, "requesting vote from sk {id = %lu, ep = %s:%s} for generation %u term " UINT64_FORMAT,
+	wp_log(LOG, "requesting vote from sk {id = " UINT64_FORMAT ", ep = %s:%s} for generation %u term " UINT64_FORMAT,
 		   sk->greetResponse.nodeId, sk->host, sk->port, wp->voteRequest.generation, wp->voteRequest.term);
 	/* On failure, logging & resetting is handled */
 	BlockingWrite(sk, sk->outbuf.data, sk->outbuf.len, SS_WAIT_VERDICT);
@@ -1064,7 +1064,7 @@ RecvVoteResponse(Safekeeper *sk)
 		return;
 
 	wp_log(LOG,
-		   "got VoteResponse from sk {id = %lu, ep = %s:%s}, generation=%u, term=%lu, voteGiven=%u, last_log_term=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X",
+		   "got VoteResponse from sk {id = " UINT64_FORMAT ", ep = %s:%s}, generation=%u, term=" UINT64_FORMAT ", voteGiven=%u, last_log_term=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X",
 		   sk->greetResponse.nodeId, sk->host, sk->port, sk->voteResponse.generation, sk->voteResponse.term,
 		   sk->voteResponse.voteGiven,
 		   GetHighestTerm(&sk->voteResponse.termHistory),
@@ -1149,7 +1149,7 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 
 			if (n_votes > 0)
 				appendStringInfoString(s, ", ");
-			appendStringInfo(s, "{id = %lu, ep = %s:%s}", sk->greetResponse.nodeId, sk->host, sk->port);
+			appendStringInfo(s, "{id = " UINT64_FORMAT ", ep = %s:%s}", sk->greetResponse.nodeId, sk->host, sk->port);
 			n_votes++;
 		}
 	}
@@ -1685,7 +1685,7 @@ SendAppendRequests(Safekeeper *sk)
 			req = &sk->appendRequest;
 			PrepareAppendRequest(sk->wp, &sk->appendRequest, sk->streamingAt, endLsn);
 
-			wp_log(DEBUG5, "sending message len %ld beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
+			wp_log(DEBUG5, "sending message len " UINT64_FORMAT " beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
 				   req->endLsn - req->beginLsn,
 				   LSN_FORMAT_ARGS(req->beginLsn),
 				   LSN_FORMAT_ARGS(req->endLsn),
@@ -1811,7 +1811,7 @@ RecvAppendResponses(Safekeeper *sk)
 		/* should never happen: sk is expected to send ERROR instead */
 		if (sk->appendResponse.generation != wp->mconf.generation)
 		{
-			wp_log(FATAL, "safekeeper {id = %lu, ep = %s:%s} sent response with generation %u, expected %u",
+			wp_log(FATAL, "safekeeper {id = " UINT64_FORMAT ", ep = %s:%s} sent response with generation %u, expected %u",
 				   sk->greetResponse.nodeId, sk->host, sk->port,
 				   sk->appendResponse.generation, wp->mconf.generation);
 		}
@@ -2999,7 +2999,7 @@ MembershipConfigurationToString(MembershipConfiguration *mconf)
 	{
 		if (i > 0)
 			appendStringInfoString(&s, ", ");
-		appendStringInfo(&s, "{node_id = %lu", mconf->members.m[i].node_id);
+		appendStringInfo(&s, "{node_id = " UINT64_FORMAT, mconf->members.m[i].node_id);
 		appendStringInfo(&s, ", host = %s", mconf->members.m[i].host);
 		appendStringInfo(&s, ", port = %u }", mconf->members.m[i].port);
 	}
@@ -3008,7 +3008,7 @@ MembershipConfigurationToString(MembershipConfiguration *mconf)
 	{
 		if (i > 0)
 			appendStringInfoString(&s, ", ");
-		appendStringInfo(&s, "{node_id = %lu", mconf->new_members.m[i].node_id);
+		appendStringInfo(&s, "{node_id = " UINT64_FORMAT, mconf->new_members.m[i].node_id);
 		appendStringInfo(&s, ", host = %s", mconf->new_members.m[i].host);
 		appendStringInfo(&s, ", port = %u }", mconf->new_members.m[i].port);
 	}

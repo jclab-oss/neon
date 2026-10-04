@@ -1824,7 +1824,7 @@ neon_dbsize(Oid dbNode)
 
 	db_size = communicator_dbsize(dbNode, &request_lsns);
 
-	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
+	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): " INT64_FORMAT " bytes",
 			 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
 
 	return db_size;
