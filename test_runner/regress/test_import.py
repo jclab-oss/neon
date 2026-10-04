@@ -145,6 +145,14 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant)
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
+    # Modify the imported pages, and read them back from the pageserver, which reconstructs
+    # them with WAL redo. The vanilla cluster may have data checksums enabled (the default
+    # since v18), which Neon doesn't maintain, so the compute must not verify them.
+    endpoint.safe_psql("""delete from t where "?column?" like '%0'""")
+    endpoint.stop()
+    endpoint.start()
+    assert endpoint.safe_psql("select count(*) from t") == [(270000,)]
+
     vanilla_pg.stop()
 
 

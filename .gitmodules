@@ -22,3 +22,9 @@
 	# url = ../postgres.git
 	url = https://github.com/neondatabase/postgres.git
 	branch = REL_17_STABLE_neon
+[submodule "vendor/postgres-v18"]
+	path = vendor/postgres-v18
+	# The relative URL resolves against this fork's own remote (which has no postgres repo)
+	# url = ../postgres.git
+	url = https://github.com/neondatabase/postgres.git
+	branch = REL_18_STABLE_neon

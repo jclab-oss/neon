@@ -175,6 +175,11 @@ pub fn generate_pg_control(
     pg_control.checkPointCopy = checkpoint;
     pg_control.state = DBState_DB_SHUTDOWNED;
 
+    // Neon doesn't maintain page checksums: e.g. the pages that WAL redo reconstructs don't
+    // have valid ones. So the compute must not verify them, even if the data was imported
+    // from a data directory with data checksums enabled, the default since PostgreSQL 18.
+    pg_control.data_checksum_version = 0;
+
     Ok((pg_control.encode(), pg_control.system_identifier, was_shutdown))
 }
 

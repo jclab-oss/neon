@@ -105,6 +105,7 @@ jobs:
       versions: ${{ steps.select.outputs.versions }}
       compute: ${{ steps.select.outputs.compute }}
       test-extensions: ${{ steps.select.outputs.test-extensions }}
+      experimental: ${{ steps.select.outputs.experimental }}
       release-test-cfg: ${{ steps.select.outputs.release-test-cfg }}
       debug-test-cfg: ${{ steps.select.outputs.debug-test-cfg }}
       test-extensions-latest-map: ${{ steps.select.outputs.test-extensions-latest-map }}
@@ -125,7 +126,12 @@ jobs:
           # libraries, the locales of which can cause data incompatibilities.
           # However, new PG versions should be build on newer images,
           # as that reduces the support burden of old and ancient distros.
-          debian = {"v14": "bullseye", "v15": "bullseye", "v16": "bullseye", "v17": "bookworm"}
+          debian = {"v14": "bullseye", "v15": "bullseye", "v16": "bullseye", "v17": "bookworm", "v18": "bookworm"}
+          # The version that the debug builds test, and that tests run_only_on_default_postgres
+          # (PgVersion.DEFAULT in test_runner/fixtures/pg_version.py) are meant for.
+          default_version = "v17"
+          # Versions whose support is still being brought up: their tests don't fail the build.
+          experimental = ("v18",)
 
           requested = os.environ["PG_VERSIONS"].strip()
           if requested:
@@ -146,6 +152,7 @@ jobs:
           versions.sort(key=lambda v: int(v[1:]))
           # neon-test-extensions images (and test-images) only exist for these versions
           test_extensions = [v for v in versions if v in ("v16", "v17")]
+          debug_version = default_version if default_version in versions else versions[-1]
 
           registry, build_tag = os.environ["REGISTRY"], os.environ["BUILD_TAG"]
           release_pr_run_id = os.environ["RELEASE_PR_RUN_ID"]
@@ -153,11 +160,17 @@ jobs:
               "versions": versions,
               "compute": [{"pg": v, "debian": debian[v]} for v in versions],
               "test-extensions": test_extensions,
-              # Release builds run the tests on every version with LFC, and on v17 without it as well;
-              # debug builds only on the latest version, without LFC.
-              "release-test-cfg": [{"pg_version": v, "lfc_state": "with-lfc"} for v in versions]
-              + [{"pg_version": "v17", "lfc_state": "without-lfc"} for v in versions if v == "v17"],
-              "debug-test-cfg": [{"pg_version": versions[-1], "lfc_state": "without-lfc"}],
+              "experimental": [v for v in versions if v in experimental],
+              # Release builds run the tests on every version with LFC, and on the default version
+              # without it as well; debug builds only on the default version, without LFC.
+              "release-test-cfg": [
+                  {"pg_version": v, "lfc_state": "with-lfc", "experimental": v in experimental}
+                  for v in versions
+              ]
+              + [{"pg_version": v, "lfc_state": "without-lfc"} for v in versions if v == default_version],
+              "debug-test-cfg": [
+                  {"pg_version": debug_version, "lfc_state": "without-lfc", "experimental": debug_version in experimental}
+              ],
               "test-extensions-latest-map": {
                   f"{registry}/neon-test-extensions-{v}:{build_tag}": [f"{registry}/neon-test-extensions-{v}:latest"]
                   for v in test_extensions
@@ -316,6 +329,15 @@ jobs:
         uses: jtmullen/submodule-branch-check-action@ab0d3a69278e3fa0a2d4f3be3199d2514b676e13 # v1.3.0
         with:
           path: "vendor/postgres-v17"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
+      - name: Check vendor/postgres-v18 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@ab0d3a69278e3fa0a2d4f3be3199d2514b676e13 # v1.3.0
+        with:
+          path: "vendor/postgres-v18"
           fetch_depth: "50"
           sub_fetch_depth: "50"
           pass_if_unchanged: true
@@ -1026,7 +1048,8 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version.pg >= 'v16'
+        # Only for the versions that the extension tests run on, see the `pg-versions` job
+        if: contains(fromJSON(needs.pg-versions.outputs.test-extensions), matrix.version.pg)
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           context: .
@@ -1106,7 +1129,8 @@ jobs:
                                              ghcr.io/${{ github.repository_owner }}/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version.pg >= 'v16'
+        # Only for the versions that the extension tests run on, see the `pg-versions` job
+        if: contains(fromJSON(needs.pg-versions.outputs.test-extensions), matrix.version.pg)
         run: |
           # Images live in this repository owner's GHCR namespace instead of `neondatabase`
           # docker buildx imagetools create -t ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
@@ -2021,6 +2045,7 @@ jobs:
           RELEASE_TAG: ${{ needs.meta.outputs.build-tag }}
           RUN_ID: ${{ needs.meta.outputs.release-pr-run-id }}
           PG_VERSIONS: ${{ needs.pg-versions.outputs.versions }}
+          EXPERIMENTAL_PG_VERSIONS: ${{ needs.pg-versions.outputs.experimental }}
         run: |
           REPOSITORY=${REPOSITORY,,}
           echo "${GH_TOKEN}" | oras login ghcr.io --username "${ACTOR}" --password-stdin
@@ -2056,6 +2081,15 @@ jobs:
                 rm -rf "${workdir}"
                 continue
               fi
+              # Neither do failing tests of experimental Postgres versions (see pg-versions), which also
+              # leave no snapshot
+              for pg_version in $(jq -r '.[]' <<< "${EXPERIMENTAL_PG_VERSIONS}"); do
+                if [[ "${name}" == compatibility-snapshot-*-pg${pg_version} ]]; then
+                  echo "::warning::${name} of the experimental ${pg_version} is missing from run ${RUN_ID}, not promoting it"
+                  rm -rf "${workdir}"
+                  continue 2
+                fi
+              done
               exit 1
             fi
 

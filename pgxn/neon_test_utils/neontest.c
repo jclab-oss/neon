@@ -140,7 +140,7 @@ test_consume_cpu(PG_FUNCTION_ARGS)
 		/* keep spinning */
 		for (int i = 0; i < 1000000; i++)
 			total_iterations++;
-		elog(DEBUG2, "test_consume_cpu(): %lu iterations in total", total_iterations);
+		elog(DEBUG2, "test_consume_cpu(): " UINT64_FORMAT " iterations in total", total_iterations);
 
 		CHECK_FOR_INTERRUPTS();
 	}
@@ -211,7 +211,7 @@ test_release_memory(PG_FUNCTION_ARGS)
 
 		if (chunks_to_release > num_memory_chunks)
 		{
-			elog(WARNING, "only %lu MB is consumed, releasing it all", num_memory_chunks);
+			elog(WARNING, "only " INT64_FORMAT " MB is consumed, releasing it all", num_memory_chunks);
 			chunks_to_release = num_memory_chunks;
 		}
 

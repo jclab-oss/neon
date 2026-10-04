@@ -224,7 +224,7 @@ static FileCacheControl *lfc_ctl;
 static bool lfc_do_prewarm;
 
 bool lfc_store_prefetch_result;
-bool lfc_prewarm_update_ws_estimation;
+static bool lfc_prewarm_update_ws_estimation;
 
 bool AmPrewarmWorker;
 

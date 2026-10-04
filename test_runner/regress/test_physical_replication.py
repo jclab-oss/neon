@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import wait_replica_caughtup
+from fixtures.pg_version import PgVersion
 from fixtures.utils import shared_buffers_for_max_cu
 
 if TYPE_CHECKING:
@@ -169,6 +170,18 @@ def connect(ep):
             time.sleep(1)
 
 
+def replica_worker_slots_config(pg_version: PgVersion) -> list[str]:
+    """
+    Since v18, the number of backend slots (MaxBackends) that the sizes of the lock
+    table and of the known-assigned-xids array depend on counts autovacuum_worker_slots
+    (default 16) rather than autovacuum_max_workers. Keep it small, so that the
+    replica still runs out of space as these tests expect.
+    """
+    if pg_version >= PgVersion.V18:
+        return ["autovacuum_worker_slots=1"]
+    return []
+
+
 def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_env: NeonEnv):
     """
     Test for primary and replica with different configuration settings (max_connections).
@@ -194,7 +207,8 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
             "max_worker_processes=5",
             "max_wal_senders=1",
             "superuser_reserved_connections=0",
-        ],
+        ]
+        + replica_worker_slots_config(env.pg_version),
     )
 
     p_con = primary.connect()
@@ -245,7 +259,8 @@ def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_sim
         config_lines=[
             "max_connections=10",
             "max_locks_per_transaction = 10",
-        ],
+        ]
+        + replica_worker_slots_config(env.pg_version),
     )
 
     n_tables = 1000

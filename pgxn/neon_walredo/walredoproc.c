@@ -114,6 +114,11 @@
 #include "storage/sinvaladt.h"
 #include "storage/smgr.h"
 #include "storage/spin.h"
+#if PG_MAJORVERSION_NUM >= 18
+#include "storage/aio.h"
+#include "storage/aio_subsys.h"
+#include "utils/guc.h"
+#endif
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
@@ -266,11 +271,24 @@ WalRedoMain(int argc, char *argv[])
 	num_temp_buffers = 4;
 	NBuffers = 4;
 
+#if PG_MAJORVERSION_NUM >= 18
+	/*
+	 * Reads go through AIO since v18. We complete them ourselves (see
+	 * inmem_startreadv()), so we don't need IO workers.
+	 */
+	SetConfigOption("io_method", "sync", PGC_POSTMASTER, PGC_S_OVERRIDE);
+
+	/*
+	 * install the simple in-memory smgr
+	 */
+	smgr_register_inmem();
+#else
 	/*
 	 * install the simple in-memory smgr
 	 */
 	smgr_hook = smgr_inmem;
 	smgr_init_hook = smgr_init_inmem;
+#endif
 
 #if PG_VERSION_NUM >= 160000
 	/* make rmgr registry believe we can register the resource manager */
@@ -285,6 +303,11 @@ WalRedoMain(int argc, char *argv[])
 	max_parallel_workers = 0;
 	max_wal_senders = 0;
 	InitializeMaxBackends();
+#if PG_MAJORVERSION_NUM >= 18
+	/* Needed for the shmem size calculation, like in single-user mode */
+	InitPostmasterChildSlots();
+	InitializeFastPathLocks();
+#endif
 
 #if PG_VERSION_NUM >= 150000
 	process_shmem_requests();
@@ -314,6 +337,19 @@ WalRedoMain(int argc, char *argv[])
 	 * this before we can use LWLocks.
 	 */
 	InitAuxiliaryProcess();
+
+#if PG_MAJORVERSION_NUM >= 18
+	/* Per-backend initialization that BaseInit() does since v18 */
+	pgaio_init_backend();
+	InitLockManagerAccess();
+
+	/*
+	 * Since v18, smgrinit() initializes all registered smgrs, and registers
+	 * an exit callback every time, so we call it only once here, and reset
+	 * the inmem smgr with smgr_init_inmem() for each record.
+	 */
+	smgrinit();
+#endif
 
 	SetProcessingMode(NormalProcessing);
 
@@ -531,32 +567,53 @@ CreateFakeSharedMemoryAndSemaphores(void)
 	CommitTsShmemInit();
 	SUBTRANSShmemInit();
 	MultiXactShmemInit();
+#if PG_MAJORVERSION_NUM >= 18
+	BufferManagerShmemInit();
+#else
 	InitBufferPool();
+#endif
 
 	/*
 	 * Set up lock manager
 	 */
+#if PG_MAJORVERSION_NUM >= 18
+	LockManagerShmemInit();
+#else
 	InitLocks();
+#endif
 
 	/*
 	 * Set up predicate lock manager
 	 */
+#if PG_MAJORVERSION_NUM >= 18
+	PredicateLockShmemInit();
+#else
 	InitPredicateLocks();
+#endif
 
 	/*
 	 * Set up process table
 	 */
 	if (!IsUnderPostmaster)
 		InitProcGlobal();
+#if PG_MAJORVERSION_NUM >= 18
+	ProcArrayShmemInit();
+	BackendStatusShmemInit();
+#else
 	CreateSharedProcArray();
 	CreateSharedBackendStatus();
+#endif
 	TwoPhaseShmemInit();
 	BackgroundWorkerShmemInit();
 
 	/*
 	 * Set up shared-inval messaging
 	 */
+#if PG_MAJORVERSION_NUM >= 18
+	SharedInvalShmemInit();
+#else
 	CreateSharedInvalidationState();
+#endif
 
 	/*
 	 * Set up interprocess signaling mechanisms
@@ -583,6 +640,9 @@ CreateFakeSharedMemoryAndSemaphores(void)
 	SyncScanShmemInit();
 	/* Skip due to the 'pg_notify' directory check */
 	/* AsyncShmemInit(); */
+#if PG_MAJORVERSION_NUM >= 18
+	AioShmemInit();
+#endif
 
 #ifdef EXEC_BACKEND
 
@@ -751,6 +811,21 @@ BeginRedoForBlock(StringInfo input_message)
 		 target_redo_tag.blockNum);
 
 	reln = smgropen(rinfo, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT);
+
+	/*
+	 * Forget the sizes of the other forks, which an earlier request with one
+	 * of them as the target might have cached (see below). With a stale size,
+	 * XLogReadBufferExtended() would extend e.g. the FSM, when a record of
+	 * this request updates it, and the extension can need more of our few
+	 * local buffers than there are. inmem_nblocks() reports all forks as
+	 * maximally sized.
+	 */
+	for (int i = 0; i <= MAX_FORKNUM; i++)
+	{
+		if (i != forknum)
+			reln->smgr_cached_nblocks[i] = InvalidBlockNumber;
+	}
+
 	if (reln->smgr_cached_nblocks[forknum] == InvalidBlockNumber ||
 		reln->smgr_cached_nblocks[forknum] < blknum + 1)
 	{
@@ -830,7 +905,11 @@ ApplyRecord(StringInfo input_message)
 	 */
 	lsn = pq_getmsgint64(input_message);
 
+#if PG_MAJORVERSION_NUM >= 18
+	smgr_init_inmem();			/* reset inmem smgr state */
+#else
 	smgrinit();					/* reset inmem smgr state */
+#endif
 
 	/* note: the input must be aligned here */
 	record = (XLogRecord *) pq_getmsgbytes(input_message, sizeof(XLogRecord));

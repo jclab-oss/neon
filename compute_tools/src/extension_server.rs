@@ -133,6 +133,7 @@ fn parse_pg_version(human_version: &str) -> PgMajorVersion {
             "15" => return PG15,
             "16" => return PG16,
             "17" => return PG17,
+            "18" => return PG18,
             _ => {}
         },
         _ => {}
@@ -348,6 +349,12 @@ mod tests {
         assert_eq!(parse_pg_version("PostgreSQL 16beta1"), PG16);
         assert_eq!(parse_pg_version("PostgreSQL 16rc2"), PG16);
         assert_eq!(parse_pg_version("PostgreSQL 16extra"), PG16);
+
+        assert_eq!(parse_pg_version("PostgreSQL 18.2"), PG18);
+        assert_eq!(
+            parse_pg_version("PostgreSQL 18.2 (a616eefea763784218a67f81395ba95bc2cf7c4d)"),
+            PG18
+        );
     }
 
     #[test]

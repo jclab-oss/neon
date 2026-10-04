@@ -211,6 +211,7 @@ impl DecodedWALRecord {
                 PgMajorVersion::PG15 => info == crate::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 PgMajorVersion::PG16 => info == crate::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 PgMajorVersion::PG17 => info == crate::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                PgMajorVersion::PG18 => info == crate::v18::bindings::XLOG_DBASE_CREATE_FILE_COPY,
             }
         } else {
             false
@@ -888,6 +889,14 @@ pub mod v17 {
     }
 }
 
+pub mod v18 {
+    // None of the records decoded here changed between PostgreSQL 17 and 18
+    pub use super::v17::{
+        XlEndOfRecovery, XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapLockUpdated,
+        XlHeapMultiInsert, XlHeapUpdate, XlParameterChange, rm_neon,
+    };
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct XlSmgrCreate {
@@ -1005,7 +1014,12 @@ impl XlXactParsedRecord {
     /// Decode a XLOG_XACT_COMMIT/ABORT/COMMIT_PREPARED/ABORT_PREPARED
     /// record. This should agree with the ParseCommitRecord and ParseAbortRecord
     /// functions in PostgreSQL (in src/backend/access/rmgr/xactdesc.c)
-    pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
+    pub fn decode(
+        buf: &mut Bytes,
+        mut xid: TransactionId,
+        xl_info: u8,
+        pg_version: PgMajorVersion,
+    ) -> XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
         let xact_time = buf.get_i64_le();
@@ -1058,7 +1072,12 @@ impl XlXactParsedRecord {
                 "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
                 nitems
             );
-            let sizeof_xl_xact_stats_item = 12;
+            // PostgreSQL 18 widened xl_xact_stats_item.objoid into objid_lo/objid_hi
+            let sizeof_xl_xact_stats_item = if pg_version >= PgMajorVersion::PG18 {
+                16
+            } else {
+                12
+            };
             buf.advance((nitems * sizeof_xl_xact_stats_item).try_into().unwrap());
         }
 
@@ -1075,6 +1094,15 @@ impl XlXactParsedRecord {
         if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
             xid = buf.get_u32_le();
             tracing::debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
+
+            // The GID of the prepared transaction follows, as a null-terminated string
+            if xinfo & pg_constants::XACT_XINFO_HAS_GID != 0 {
+                let gid_len = buf
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map_or(buf.len(), |pos| pos + 1);
+                buf.advance(gid_len);
+            }
         }
 
         let origin_lsn = if xinfo & pg_constants::XACT_XINFO_HAS_ORIGIN != 0 {
@@ -1236,4 +1264,88 @@ pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, Deserializ
     };
 
     Ok(String::from(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::{BufMut, BytesMut};
+
+    use super::*;
+
+    /// Build the main data of a COMMIT PREPARED record with every optional part, like
+    /// XactLogCommitRecord() does, with dropped stats items of the given size.
+    fn commit_prepared_record(stats_item_size: usize, with_gid: bool) -> Bytes {
+        let mut xinfo = pg_constants::XACT_XINFO_HAS_DBINFO
+            | pg_constants::XACT_XINFO_HAS_SUBXACTS
+            | pg_constants::XACT_XINFO_HAS_RELFILENODES
+            | crate::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS
+            | pg_constants::XACT_XINFO_HAS_INVALS
+            | pg_constants::XACT_XINFO_HAS_TWOPHASE
+            | pg_constants::XACT_XINFO_HAS_ORIGIN;
+        if with_gid {
+            xinfo |= pg_constants::XACT_XINFO_HAS_GID;
+        }
+        let mut buf = BytesMut::new();
+        buf.put_i64_le(12345); // xact_time
+        buf.put_u32_le(xinfo);
+        buf.put_u32_le(5); // dbId
+        buf.put_u32_le(1663); // tsId
+        buf.put_i32_le(2); // subxacts
+        buf.put_u32_le(1001);
+        buf.put_u32_le(1002);
+        buf.put_i32_le(1); // relfilelocators
+        buf.put_u32_le(1663);
+        buf.put_u32_le(5);
+        buf.put_u32_le(16384);
+        buf.put_i32_le(3); // dropped stats items
+        buf.put_bytes(0xAA, 3 * stats_item_size);
+        buf.put_i32_le(2); // invalidation messages
+        buf.put_bytes(0xBB, 2 * 16);
+        buf.put_u32_le(777); // xid of the prepared transaction
+        if with_gid {
+            buf.put_slice(b"some gid\0");
+        }
+        buf.put_u64_le(0x0102_0304_0506_0708); // origin_lsn
+        buf.put_i64_le(54321); // origin_timestamp
+        buf.freeze()
+    }
+
+    fn decode(mut buf: Bytes, pg_version: PgMajorVersion) -> XlXactParsedRecord {
+        XlXactParsedRecord::decode(
+            &mut buf,
+            42,
+            pg_constants::XLOG_XACT_COMMIT_PREPARED | pg_constants::XLOG_XACT_HAS_INFO,
+            pg_version,
+        )
+    }
+
+    fn check(parsed: &XlXactParsedRecord) {
+        assert_eq!(parsed.xact_time, 12345);
+        assert_eq!((parsed.db_id, parsed.ts_id), (5, 1663));
+        assert_eq!(parsed.subxacts, vec![1001, 1002]);
+        assert_eq!(parsed.xnodes.len(), 1);
+        assert_eq!(parsed.xnodes[0].relnode, 16384);
+        assert_eq!(parsed.xid, 777);
+        assert_eq!(parsed.origin_lsn, Lsn(0x0102_0304_0506_0708));
+    }
+
+    #[test]
+    fn test_xact_record_after_dropped_stats() {
+        // xl_xact_stats_item has 12 bytes before v18, and 16 bytes since
+        for with_gid in [false, true] {
+            check(&decode(
+                commit_prepared_record(12, with_gid),
+                PgMajorVersion::PG17,
+            ));
+            check(&decode(
+                commit_prepared_record(16, with_gid),
+                PgMajorVersion::PG18,
+            ));
+        }
+        // A v18 record read with the v17 layout gets the following fields wrong, or fails
+        let misread = std::panic::catch_unwind(|| {
+            decode(commit_prepared_record(16, false), PgMajorVersion::PG17).xid
+        });
+        assert_ne!(misread.ok(), Some(777));
+    }
 }

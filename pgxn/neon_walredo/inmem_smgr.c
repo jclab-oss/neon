@@ -31,6 +31,7 @@
 #endif
 
 #include "inmem_smgr.h"
+#include "../neon/neon_smgr_aio.h"
 
 /* Size of the in-memory smgr: XLR_MAX_BLOCK_ID is 32, so assume that 64 will be enough */
 #define MAX_PAGES 64
@@ -361,8 +362,47 @@ inmem_registersync(SMgrRelation reln, ForkNumber forknum)
 }
 #endif
 
+#if PG_MAJORVERSION_NUM >= 18
+static uint32
+inmem_maxcombine(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+{
+	return 1;
+}
+
+/*
+ * The buffer manager reads blocks through smgrstartreadv() since v18. We
+ * can read them right away, and complete the AIO handle ourselves.
+ */
+static void
+inmem_startreadv(PgAioHandle *ioh, SMgrRelation reln, ForkNumber forknum,
+				 BlockNumber blocknum, void **buffers, BlockNumber nblocks)
+{
+	for (BlockNumber i = 0; i < nblocks; i++)
+		inmem_read(reln, forknum, blocknum + i, buffers[i]);
+
+	neon_aio_complete_readv(ioh, reln, forknum, blocknum, nblocks);
+}
+
+static int
+inmem_fd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
+{
+	elog(ERROR, "inmem smgr relations cannot be accessed with a file descriptor");
+	pg_unreachable();
+}
+
+/* The WAL redo process uses this smgr for all relations */
+static bool
+inmem_owns(RelFileLocator rlocator, ProcNumber backend, char relpersistence)
+{
+	return true;
+}
+#endif
+
 static const struct f_smgr inmem_smgr =
 {
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_name = "inmem",
+#endif
 	.smgr_init = inmem_init,
 	.smgr_shutdown = NULL,
 	.smgr_open = inmem_open,
@@ -376,7 +416,13 @@ static const struct f_smgr inmem_smgr =
 #endif
 #if PG_MAJORVERSION_NUM >= 17
 	.smgr_prefetch = inmem_prefetch,
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_maxcombine = inmem_maxcombine,
+#endif
 	.smgr_readv = inmem_readv,
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_startreadv = inmem_startreadv,
+#endif
 	.smgr_writev = inmem_writev,
 #else
 	.smgr_prefetch = inmem_prefetch,
@@ -392,14 +438,26 @@ static const struct f_smgr inmem_smgr =
 	.smgr_registersync = inmem_registersync,
 #endif
 
+#if PG_MAJORVERSION_NUM >= 18
+	.smgr_fd = inmem_fd,
+	.smgr_owns = inmem_owns,
+#else
 	.smgr_start_unlogged_build = NULL,
 	.smgr_finish_unlogged_build_phase_1 = NULL,
 	.smgr_end_unlogged_build = NULL,
+#endif
 #if PG_MAJORVERSION_NUM < 17
 	.smgr_read_slru_segment = NULL,
 #endif
 };
 
+#if PG_MAJORVERSION_NUM >= 18
+void
+smgr_register_inmem(void)
+{
+	(void) smgrregister(&inmem_smgr);
+}
+#else
 const f_smgr *
 smgr_inmem(ProcNumber backend, NRelFileInfo rinfo)
 {
@@ -410,6 +468,7 @@ smgr_inmem(ProcNumber backend, NRelFileInfo rinfo)
 	// else
 	return &inmem_smgr;
 }
+#endif
 
 void
 smgr_init_inmem()

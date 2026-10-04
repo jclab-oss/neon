@@ -65,13 +65,13 @@
 char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
-int			safekeeper_proto_version = 3;
-char	   *safekeeper_conninfo_options = "";
+static int	safekeeper_proto_version = 3;
+static char *safekeeper_conninfo_options = "";
 /* BEGIN_HADRON */
-int         databricks_max_wal_mb_per_second = -1;
+static int	databricks_max_wal_mb_per_second = -1;
 // during throttling, we will limit the effective WAL write rate to 10KB.
 // PG can still push some WAL to SK, but at a very low rate.
-int 		databricks_throttled_max_wal_bytes_per_second = 10 * 1024;
+static int	databricks_throttled_max_wal_bytes_per_second = 10 * 1024;
 // The max sleep time of a batch. This is to make sure the rate limiter does not
 // overshoot too much and block PG for a very long time.
 // This is set as 5 minuetes for now. PG can send as much as 10MB of WALs to SK in one batch,
@@ -655,12 +655,12 @@ backpressure_throttling_impl(void)
 	old_status = get_ps_display(&len);
 	new_status = (char *) palloc(len + 64 + 1);
 	memcpy(new_status, old_status, len);
-	snprintf(new_status + len, 64, "backpressure throttling: lag %lu", lag);
+	snprintf(new_status + len, 64, "backpressure throttling: lag " UINT64_FORMAT, lag);
 	set_ps_display(new_status);
 	new_status[len] = '\0';		/* truncate off " backpressure ..." to later
 								 * reset the ps */
 
-	elog(DEBUG2, "backpressure throttling: lag %lu", lag);
+	elog(DEBUG2, "backpressure throttling: lag " UINT64_FORMAT, lag);
 	start = GetCurrentTimestamp();
 	pg_usleep(BACK_PRESSURE_DELAY);
 	stop = GetCurrentTimestamp();
@@ -1459,7 +1459,11 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 
 	if (cmd->slotname)
 	{
+#if PG_MAJORVERSION_NUM >= 18
+		ReplicationSlotAcquire(cmd->slotname, true, true);
+#else
 		ReplicationSlotAcquire(cmd->slotname, true);
+#endif
 		if (SlotIsLogical(MyReplicationSlot))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -1648,7 +1652,7 @@ XLogBroadcastWalProposer(WalProposer *wp)
 			uint64_t batch_start_time = pg_atomic_read_u64(&limiter->batch_start_time_us);
 			uint64 throttle_usecs = USECS_PER_SEC * limiter->sent_bytes / Max(effective_max_wal_bytes_per_second, 1);
 			if (throttle_usecs > kRateLimitMaxBatchUSecs){
-				elog(LOG, "throttle_usecs %lu is too large, limiting to %lu", throttle_usecs, kRateLimitMaxBatchUSecs);
+				elog(LOG, "throttle_usecs " UINT64_FORMAT " is too large, limiting to " UINT64_FORMAT, throttle_usecs, kRateLimitMaxBatchUSecs);
 				throttle_usecs = kRateLimitMaxBatchUSecs;
 			}
 

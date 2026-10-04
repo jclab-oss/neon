@@ -13,8 +13,7 @@ use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::{
-    BLCKSZ, ControlFileData, DBState_DB_SHUTDOWNED, Oid, WAL_SEGMENT_SIZE, XLogFileName,
-    pg_constants,
+    BLCKSZ, DBState_DB_SHUTDOWNED, Oid, PgControlData, WAL_SEGMENT_SIZE, XLogFileName, pg_constants,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
@@ -35,8 +34,8 @@ pub fn get_lsn_from_controlfile(path: &Utf8Path) -> Result<Lsn> {
     let controlfile_path = path.join("global").join("pg_control");
     let controlfile_buf = std::fs::read(&controlfile_path)
         .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
-    let controlfile = ControlFileData::decode(&controlfile_buf)?;
-    let lsn = controlfile.checkPoint;
+    let controlfile = PgControlData::decode(&controlfile_buf)?;
+    let lsn = controlfile.checkpoint;
 
     Ok(Lsn(lsn))
 }
@@ -53,7 +52,7 @@ pub async fn import_timeline_from_postgres_datadir(
     pgdata_lsn: Lsn,
     ctx: &RequestContext,
 ) -> Result<()> {
-    let mut pg_control: Option<ControlFileData> = None;
+    let mut pg_control: Option<PgControlData> = None;
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
@@ -92,7 +91,7 @@ pub async fn import_timeline_from_postgres_datadir(
         "Postgres cluster was not shut down cleanly"
     );
     ensure!(
-        pg_control.checkPointCopy.redo == pgdata_lsn.0,
+        pg_control.checkpoint_redo == pgdata_lsn.0,
         "unexpected checkpoint REDO pointer"
     );
 
@@ -102,7 +101,7 @@ pub async fn import_timeline_from_postgres_datadir(
     import_wal(
         &pgdata_path.join("pg_wal"),
         tline,
-        Lsn(pg_control.checkPointCopy.redo),
+        Lsn(pg_control.checkpoint_redo),
         pgdata_lsn,
         ctx,
     )
@@ -360,7 +359,7 @@ pub async fn import_basebackup_from_tar(
     let mut modification = tline.begin_modification_for_import(base_lsn);
     modification.init_empty()?;
 
-    let mut pg_control: Option<ControlFileData> = None;
+    let mut pg_control: Option<PgControlData> = None;
 
     // Import base
     let mut entries = Archive::new(reader).entries()?;
@@ -507,7 +506,7 @@ async fn import_file(
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
     ctx: &RequestContext,
-) -> Result<Option<ControlFileData>> {
+) -> Result<Option<PgControlData>> {
     let file_name = match file_path.file_name() {
         Some(name) => name.to_string_lossy(),
         None => return Ok(None),
@@ -528,9 +527,8 @@ async fn import_file(
                 let bytes = read_all_bytes(reader).await?;
 
                 // Extract the checkpoint record and import it separately.
-                let pg_control = ControlFileData::decode(&bytes[..])?;
-                let checkpoint_bytes = pg_control.checkPointCopy.encode()?;
-                modification.put_checkpoint(checkpoint_bytes)?;
+                let pg_control = PgControlData::decode(&bytes[..])?;
+                modification.put_checkpoint(pg_control.checkpoint_copy.clone())?;
                 debug!("imported control file");
 
                 // Import it as ControlFile

@@ -93,6 +93,18 @@ pg_settings:
     hot_standby: "on"
 
   per_version:
+    18:
+      common:
+        # Same as for 17, see below
+        io_combine_limit: "1"
+        # Since PostgreSQL 18, reads go through the AIO subsystem, but the read stream code only
+        # issues the prefetch requests (smgrprefetch) that Neon's prefetching depends on with
+        # io_method=sync. compute_ctl sets this too.
+        io_method: "sync"
+      replica:
+        # prefetching of blocks referenced in WAL doesn't make sense for us
+        # Neon hot standby ignores pages that are not in the shared_buffers
+        recovery_prefetch: "off"
     17:
       common:
         # PostgreSQL 17 has a new IO system called "read stream", which can combine IOs up to some

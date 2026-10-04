@@ -1,5 +1,5 @@
 local MIN_SUPPORTED_VERSION = 14;
-local MAX_SUPPORTED_VERSION = 17;
+local MAX_SUPPORTED_VERSION = 18;
 local SUPPORTED_VERSIONS = std.range(MIN_SUPPORTED_VERSION, MAX_SUPPORTED_VERSION);
 
 # If we receive the pg_version with a leading "v", ditch it.
